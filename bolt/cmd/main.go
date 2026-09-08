@@ -17,9 +17,9 @@ func main() {
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
 	namespace := getEnv("NAMESPACE", "bolt")
 
-	b := broker.NewBroker(redisAddr, namespace)
-	go b.Start()
-
 	d := dispatcher.NewDispatcher(redisAddr, namespace)
-	d.Start()
+	go d.Start()
+
+	b := broker.NewBroker(redisAddr, namespace)
+	b.Start()
 }

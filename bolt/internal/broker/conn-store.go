@@ -1,4 +1,4 @@
-package dispatcher
+package broker
 
 import (
 	"bolt/internal/common"
