@@ -32,7 +32,7 @@ from common import (
 )
 
 RADII = [100, 250, 500, 1_000, 2_500, 5_000, 10_000]
-STORE_NAMES = ["postgres", "redis", "aerospike"]
+STORE_NAMES = ["postgres", "redis", "aerospike", "elastic"]
 # Method name -> the store method that implements it. Stores advertise only the
 # ones they actually have.
 METHOD_ATTR = {
@@ -54,6 +54,7 @@ _store_errors: dict[str, str] = {}
 def _connect_all() -> None:
     """Connect to whatever is reachable; record failures instead of crashing."""
     from aerospike_geo import AerospikeStore
+    from elastic_geo import ElasticStore
     from postgres_geo import PostgresStore
     from redis_geo import RedisStore
 
@@ -61,6 +62,7 @@ def _connect_all() -> None:
         ("postgres", PostgresStore),
         ("redis", RedisStore),
         ("aerospike", AerospikeStore),
+        ("elastic", ElasticStore),
     ):
         try:
             _stores[name] = factory()
@@ -220,7 +222,7 @@ def knn(
         "k": k,
         "latency_ms": round(statistics.median(samples), 2),
         "exact": [h.id for h in hits] == truth,
-        "implementation": "native <-> operator" if store == "postgres" else "expanding radius loop",
+        "implementation": getattr(s, "knn_impl", "expanding radius loop"),
         "hits": [
             {"id": h.id, "lat": h.lat, "lng": h.lng, "d": round(h.distance_m, 1)} for h in hits
         ],

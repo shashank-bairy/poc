@@ -39,12 +39,15 @@ export const ACCESS_PATH = {
   'redis:s2': 'one pipelined batch of range scans',
   'aerospike:h3': 'one batch_read, cell ID is the key',
   'aerospike:s2': 'one query per range — not batchable',
+  'elastic:h3': 'one terms clause over the k-ring',
+  'elastic:s2': 'one bool.should of range clauses',
 }
 
 export const STORE_LABELS = {
   postgres: 'Postgres / PostGIS',
   redis: 'Redis',
   aerospike: 'Aerospike',
+  elastic: 'Elasticsearch',
 }
 
 // Short forms for the comparison table, where the column is narrow.
@@ -52,4 +55,5 @@ export const STORE_SHORT = {
   postgres: 'Postgres',
   redis: 'Redis',
   aerospike: 'Aerospike',
+  elastic: 'Elastic',
 }

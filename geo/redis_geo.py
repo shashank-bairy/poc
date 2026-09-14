@@ -33,6 +33,7 @@ S2_KEY = "geo:s2"  # lex-ordered sorted set
 
 class RedisStore:
     name = "redis"
+    knn_impl = "expanding radius"
 
     def __init__(self, host: str = "localhost", port: int = 6380):
         self.r = redis.Redis(host=host, port=port, decode_responses=True)

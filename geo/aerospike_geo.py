@@ -52,6 +52,7 @@ H3_SET = "h3idx"
 
 class AerospikeStore:
     name = "aerospike"
+    knn_impl = "expanding radius"
 
     def __init__(self, host: str = "127.0.0.1", port: int = 3000):
         self.client = aerospike.client({"hosts": [(host, port)]}).connect()

@@ -1,13 +1,14 @@
-# Geospatial Indexing POC — Redis, Aerospike, Postgres/PostGIS, H3, S2
+# Geospatial Indexing POC — Redis, Aerospike, Postgres/PostGIS, Elasticsearch, H3, S2
 
 ## Goal
 
-Understand five approaches to geospatial querying, grouped by what they actually are:
+Understand six approaches to geospatial querying, grouped by what they actually are:
 
 - **Native geo indexes** — systems with spatial querying built in:
   - Redis (geohash encoded into a sorted set)
   - Aerospike (geohash-based secondary index)
   - Postgres/PostGIS (R-tree via GiST)
+  - Elasticsearch (BKD tree over `geo_point`)
 - **Pure indexing schemes** — no storage of their own, just cell-ID encodings layered on top of any database:
   - H3 (Uber, hexagonal grid)
   - S2 (Google, quadtree/square grid)
@@ -19,6 +20,7 @@ Understand five approaches to geospatial querying, grouped by what they actually
 | **Redis** | Sorted set with geohash encoded as the score | `GEOADD`, `GEOSEARCH`. Fast, in-memory. Approximate at geohash cell edges. |
 | **Aerospike** | Geohash-based secondary index (regions/cells) | `GeoJSON` bin + geo index. Good for radius/polygon "points-in-region." No native KNN — approximate with expanding radius queries. |
 | **Postgres (PostGIS)** | GiST R-tree over `geometry`/`geography` | The reference implementation. True radius, KNN (`<->` operator), polygon containment, spatial joins. |
+| **Elasticsearch** | BKD tree (block k-d tree) over `geo_point` | The same structure it indexes numbers and dates with. Radius, bounding box, polygon, region containment — all native. No KNN: `sort: _geo_distance` is exact but a scan. Immutable segments, so writes are visible only after a refresh. |
 | **H3** | Hierarchical hexagonal grid, cell ID per point | Hexagons give uniform neighbor distance — good for ring/buffer-style queries. |
 | **S2** | Hierarchical quadtree on cube faces, cell ID per point | Squares subdivide recursively — good for hierarchical containment and covering large/irregular regions. |
 
@@ -33,8 +35,11 @@ docker network create geo-net
 docker run -d --name redis --network geo-net -p 6379:6379 redis/redis-stack
 docker run -d --name aerospike --network geo-net -p 3000:3000 aerospike/aerospike-server
 docker run -d --name postgis --network geo-net -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgis/postgis
+docker run -d --name elastic --network geo-net -p 9200:9200 \
+  -e discovery.type=single-node -e xpack.security.enabled=false \
+  docker.elastic.co/elasticsearch/elasticsearch:8.15.3
 
-pip install redis aerospike psycopg2-binary h3 s2sphere folium haversine
+pip install redis aerospike psycopg2-binary elasticsearch h3 s2sphere folium haversine
 ```
 
 Generate **one shared dataset once** and save it to `points.csv` (columns: `id, lat, lng`) — e.g. 20k random points clustered around a city center. Every system loads from this same file so results stay comparable.
@@ -63,7 +68,7 @@ Do these in sequence — each step gives you the grounding to understand the nex
 - KNN isn't native — implement it as "expand radius until you have k results, then sort client-side by distance."
 - Compare against Postgres KNN.
 
-### Step 4 — H3 layer (add to all three systems)
+### Step 4 — H3 layer (add to all four systems)
 
 - Precompute `h3_cell = h3.latlng_to_cell(lat, lng, res)` for every point (start with resolution 7–9).
 - In each system, add a plain integer/string column/field/bin for `h3_cell`, indexed normally (btree/hash — nothing spatial).
@@ -83,6 +88,7 @@ Do these in sequence — each step gives you the grounding to understand the nex
 | Radius query latency at 3 radii (100m, 1km, 10km) | Native indexes and cell-based approaches scale differently |
 | Precision (points wrongly included/excluded vs. Postgres ground truth) | Geohash and grid cells both have boundary artifacts |
 | Query code complexity | KNN is one line in Postgres, manual everywhere else |
+| Result-set transfer cost | Separate "find the rows" from "return the rows" — a store tuned for top-N pages looks slow when asked for thousands |
 
 ## Deliverable structure
 
@@ -93,11 +99,12 @@ geo-poc/
 ├── postgres_geo.py         # load_data(), radius_query(), knn_query(), h3_radius_query()
 ├── redis_geo.py            # same interface
 ├── aerospike_geo.py        # same interface
+├── elastic_geo.py          # same interface
 ├── s2_layer.py             # S2 covering logic, usable against any store
 └── compare.py              # runs all queries, prints results table + generates map plots
 ```
 
-Keep the same four function names (`load_data`, `radius_query`, `knn_query`, `h3_radius_query`) across `postgres_geo.py`, `redis_geo.py`, and `aerospike_geo.py` so `compare.py` can call them uniformly and produce a single apples-to-apples results table.
+Keep the same four function names (`load_data`, `radius_query`, `knn_query`, `h3_radius_query`) across `postgres_geo.py`, `redis_geo.py`, `aerospike_geo.py` and `elastic_geo.py` so `compare.py` can call them uniformly and produce a single apples-to-apples results table.
 
 ## The "aha" artifact
 

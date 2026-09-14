@@ -42,6 +42,7 @@ INDEXES = [
 
 class PostgresStore:
     name = "postgres"
+    knn_impl = "native <-> operator"
 
     def __init__(self, dsn: str = DSN):
         self.conn = psycopg2.connect(dsn)

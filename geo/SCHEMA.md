@@ -272,20 +272,138 @@ Aerospike also has **no KNN**, same expanding-radius loop as Redis.
 
 ---
 
+## Elasticsearch
+
+One index, three layouts again: a `geo_point` field for the native search, and
+two perfectly ordinary fields — a `keyword` and a `long` — for the cell IDs.
+
+### Mapping
+
+```json
+PUT /geo_points
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "refresh_interval": "-1"
+  },
+  "mappings": {
+    "properties": {
+      "id":       { "type": "long" },
+      "lat":      { "type": "double" },
+      "lng":      { "type": "double" },
+      "location": { "type": "geo_point" },
+      "h3_cell":  { "type": "keyword" },
+      "s2_cell":  { "type": "long"    }
+    }
+  }
+}
+```
+
+`refresh_interval: -1` is a bulk-load setting, not a permanent one. New documents
+land in new segments and stay invisible to search until a refresh; switching it
+off means the loader is not building searchable segments every second while
+nothing is querying. The loader refreshes once at the end, force-merges to a
+single segment, and puts the interval back to `1s`.
+
+There is no `CREATE INDEX` step — the BKD tree is written as part of each
+segment. What the load table calls "index build" is refresh plus force-merge.
+
+### One document
+
+```json
+GET /geo_points/_doc/18427
+
+{
+  "id": 18427,
+  "lat": 12.9716343,
+  "lng": 77.593828,
+  "location": { "lat": 12.9716343, "lon": 77.593828 },
+  "h3_cell": "8860145b49fffff",
+  "s2_cell": -4922972641711042653
+}
+```
+
+Note `location` uses **`lon`**, not `lng` — Elasticsearch's geo formats are a
+well-known foot-gun. The object form above is unambiguous; the array form
+`[77.593828, 12.9716343]` is **[lon, lat]**, GeoJSON order, the reverse of the
+string form `"12.9716343,77.593828"` which is **"lat,lon"**. Three formats, two
+orderings, silently accepted either way.
+
+`s2_cell` is the signed-shifted value: Elasticsearch `long` is signed 64-bit,
+same constraint as a Postgres `bigint`.
+
+### The three queries
+
+```json
+// 1. Native: geo_distance over the BKD tree.
+//    distance_type defaults to "arc" (Haversine); "plane" is the cheap
+//    flat-earth approximation.
+{ "geo_distance": {
+    "distance": "1000m",
+    "distance_type": "arc",
+    "location": { "lat": 12.9716, "lon": 77.5946 }
+}}
+
+// 2. H3: one terms clause carries the whole k-ring. Ceiling is 65,536 terms.
+{ "terms": { "h3_cell": ["8860145b49fffff", "..."] } }   // 547 values
+
+// 3. S2: one bool.should of range clauses -- all 32 ranges in ONE request.
+{ "bool": {
+    "should": [
+      { "range": { "s2_cell": { "gte": -4922972641711042653,
+                                "lte": -4922972641708945408 } } }
+      // ... 31 more
+    ],
+    "minimum_should_match": 1
+}}
+```
+
+**Reading the results back is the part that costs.** A 10 km disc matches 7,438
+documents, past the 10,000-document `from`/`size` window and well past the point
+where `from` is sane. Every read here pages with `search_after`:
+
+```python
+body = {
+    "query": query,
+    "size": 5000,
+    "sort": [{"id": "asc"}],       # a total order, so paging is stable
+    "_source": False,              # do not read or parse the stored JSON
+    "docvalue_fields": ["id", "lat", "lng"],   # read the columnar copy instead
+    "track_total_hits": False,     # do not count what we are about to fetch
+}
+# then: body["search_after"] = last_hit["sort"], repeat until a short page
+```
+
+`_source: false` plus `docvalue_fields` is the meaningful optimisation: doc
+values are a columnar, on-disk copy of the field written for sorting and
+aggregation, and reading three numbers out of it beats decompressing and parsing
+the whole `_source` JSON for thousands of hits.
+
+**No KNN.** `sort: _geo_distance` gives an exact answer by computing the
+distance for every matching document — a scan, not an index walk. Elasticsearch's
+`knn` query is for `dense_vector` similarity and does not apply to `geo_point`.
+
+---
+
 ## Side by side
 
-| | Postgres | Redis | Aerospike |
-|---|---|---|---|
-| **Native geo** | `geography` + GiST R-tree | sorted set, geohash as score | GeoJSON bin + GEO2DSPHERE index |
-| **H3 stored as** | `text` column, btree | one set per cell | **primary key of its own record** |
-| **H3 fetched by** | `= ANY(cells)`, one query | `SUNION`, one command | `batch_read`, one call |
-| **S2 stored as** | `bigint` column, btree | hex prefix in a zset member | `integer` bin, numeric index |
-| **S2 fetched by** | join on `BETWEEN`, one query | pipelined `ZRANGEBYLEX` | one query per range |
-| **Native KNN** | yes, `<->` | no | no |
-| **Signed 64-bit issue** | shift needed | avoided via hex strings | shift needed |
+| | Postgres | Redis | Aerospike | Elasticsearch |
+|---|---|---|---|---|
+| **Native geo** | `geography` + GiST R-tree | sorted set, geohash as score | GeoJSON bin + GEO2DSPHERE index | `geo_point` + BKD tree |
+| **H3 stored as** | `text` column, btree | one set per cell | **primary key of its own record** | `keyword` field |
+| **H3 fetched by** | `= ANY(cells)`, one query | `SUNION`, one command | `batch_read`, one call | one `terms` clause |
+| **S2 stored as** | `bigint` column, btree | hex prefix in a zset member | `integer` bin, numeric index | `long` field |
+| **S2 fetched by** | join on `BETWEEN`, one query | pipelined `ZRANGEBYLEX` | one query per range | one `bool.should` of ranges |
+| **Native KNN** | yes, `<->` | no | no | no (exact, but a scan-and-sort) |
+| **Signed 64-bit issue** | shift needed | avoided via hex strings | shift needed | shift needed |
+| **Reading many rows** | cursor, binary protocol | pipelined, binary protocol | `batch_read`, binary protocol | `search_after` paging, JSON over HTTP |
 
-The H3 row is the interesting one: same scheme, three completely different
+The H3 row is the interesting one: same scheme, four completely different
 physical layouts, each chosen to fit how that database wants to be read.
+
+The last row is the one that explains Elasticsearch's timings — see lesson 6 in
+the README.
 
 ---
 
@@ -295,6 +413,7 @@ physical layouts, each chosen to fit how that database wants to be read.
 uv run postgres_geo.py     # rebuilds the table and prints load stats
 uv run redis_geo.py        # rebuilds all four Redis keys
 uv run aerospike_geo.py    # rebuilds both sets and the indexes
+uv run elastic_geo.py      # recreates the index, bulk-loads, force-merges
 ```
 
 Inspecting by hand:

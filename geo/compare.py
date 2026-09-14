@@ -39,6 +39,8 @@ ACCESS_PATH = {
     ("redis", "s2"): "pipelined ZRANGEBYLEX",
     ("aerospike", "h3"): "batch_read on keys",
     ("aerospike", "s2"): "one query per range",
+    ("elastic", "h3"): "one terms clause",
+    ("elastic", "s2"): "one bool.should of ranges",
 }
 
 
@@ -77,6 +79,10 @@ def open_stores(which: list[str]):
         from aerospike_geo import AerospikeStore
 
         stores.append(AerospikeStore())
+    if "elastic" in which:
+        from elastic_geo import ElasticStore
+
+        stores.append(ElasticStore())
     return stores
 
 
@@ -92,7 +98,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--stores",
-        default="postgres,redis,aerospike",
+        default="postgres,redis,aerospike,elastic",
         help="comma-separated subset to run",
     )
     ap.add_argument("--skip-load", action="store_true", help="query existing data, do not reload")
@@ -155,7 +161,7 @@ def main() -> None:
                 f"k={K}",
                 f"{ms:.1f}",
                 "exact" if got == truth_knn else f"{len(set(got) & set(truth_knn))}/{K} overlap",
-                "native" if s.name == "postgres" else "expanding radius",
+                getattr(s, "knn_impl", "expanding radius"),
             ]
         )
     print("KNN QUERY")
@@ -171,6 +177,16 @@ def main() -> None:
                 spheroid = s.spheroid_radius_count(CENTER_LAT, CENTER_LNG, radius)
                 rows.append([f"{int(radius)}m", sphere, spheroid, spheroid - sphere])
             print(table(["radius", "sphere", "WGS84 spheroid", "delta"], rows), "\n")
+
+    for s in stores:
+        if s.name == "elastic":
+            print("DISTANCE TYPE (elastic only)")
+            rows = []
+            for radius in RADII:
+                arc = len(s.radius_query(CENTER_LAT, CENTER_LNG, radius))
+                plane = s.plane_radius_count(CENTER_LAT, CENTER_LNG, radius)
+                rows.append([f"{int(radius)}m", arc, plane, plane - arc])
+            print(table(["radius", "arc (default)", "plane", "delta"], rows), "\n")
 
     for s in stores:
         s.close()

@@ -1,7 +1,7 @@
 # geo — how databases answer "what's near me?"
 
-A hands-on POC. 20,000 pretend shops scattered around Bangalore, stored in three
-different databases, and one question asked six different ways:
+A hands-on POC. 20,000 pretend shops scattered around Bangalore, stored in four
+different databases, and one question asked twelve different ways:
 
 > **Which shops are within 1 km of where I'm standing?**
 
@@ -50,7 +50,7 @@ two dimensions into one, so ordinary database machinery works again?*
 ### Family A: "Let the database handle it"
 
 Some databases ship with spatial support built in. You give them coordinates,
-they build a special index, you ask for a radius, you get an answer. Three of
+they build a special index, you ask for a radius, you get an answer. Four of
 them are compared here:
 
 **Postgres + PostGIS — nested boxes (an "R-tree")**
@@ -93,6 +93,26 @@ only shape of question it does natively.
 Aerospike also has a second, very different way in — fetching records straight
 by primary key, thousands at a time in a single `batch_read`. Which way in you
 pick turns out to matter enormously; see Part 5.
+
+**Elasticsearch — a k-d tree over packed coordinates**
+
+Elasticsearch is a search engine, and its geo support is the same machinery it
+uses for numbers and dates: a **BKD tree**. Take all the points, sort them,
+split them into blocks along whichever axis is currently widest, recurse. The
+result is a tree where each node owns a rectangle of space, much like the R-tree
+above, but built bottom-up from sorted data into an immutable file rather than
+maintained in place.
+
+That immutability is the whole character of the thing. Writes go into new
+segments and only become visible on a **refresh** (once a second by default),
+which is why the loader here turns refresh off during the bulk and turns it back
+on afterwards. The payoff is that every read is against a frozen, tightly packed
+structure.
+
+It answers radius, bounding box, polygon containment and "which region is this
+point in" natively — the same breadth as PostGIS. What it does *not* do is
+nearest-neighbour: sorting by `_geo_distance` computes the distance for every
+matching document, so KNN here is exact but is a scan, not an index walk.
 
 ### Family B: "Do it yourself with cell IDs"
 
@@ -190,7 +210,7 @@ Open **http://localhost:5173**.
 What you can do there:
 
 - **Click anywhere on the map** to move the search.
-- **Pick a database** (Postgres / Redis / Aerospike) and a **method** (its own
+- **Pick a database** (Postgres / Redis / Aerospike / Elasticsearch) and a **method** (its own
   built-in index, or H3, or S2). Every combination runs against the real
   database and gets timed. The panel shows how each store actually fetched the
   cells — the wording differs per database, and that difference is Part 5.
@@ -199,8 +219,8 @@ What you can do there:
   inside, on top of your circle. This is the single most useful thing in the
   UI — turn on "Geohash boxes" and see how enormous Redis' search area is
   compared to your circle.
-- **"Race them all"** runs all nine combinations at your current spot and ranks
-  them.
+- **"Race them all"** runs all twelve combinations at your current spot and
+  ranks them.
 
 Dot colours on the map:
 
@@ -219,10 +239,10 @@ uv run maps.py        # writes maps/coverage_100m.html etc.
 ### Manual setup, if you'd rather not use `run.sh`
 
 ```bash
-docker compose up -d          # postgis on :55432, redis on :6380, aerospike on :3000
+docker compose up -d          # postgis :55432, redis :6380, aerospike :3000, elastic :9201
 uv sync
 uv run generate_data.py       # writes points.csv
-uv run compare.py             # loads all three stores, prints the tables
+uv run compare.py             # loads all four stores, prints the tables
 ```
 
 Ports are deliberately shifted off the defaults so the containers don't fight
@@ -252,9 +272,16 @@ Times in milliseconds. Lower is better; the best in each column is bold.
 | Aerospike | its own index | 1.1 | 1.3 | 22.5 | — |
 | Aerospike | H3 | 0.6 | 1.2 | **15.0** | one `batch_read`, cell ID is the key |
 | Aerospike | S2 | 1.3 | 10.8 | 56.0 | 32 separate queries |
+| Elasticsearch | its own index | 4.8 | 5.2 | 108.6 | — |
+| Elasticsearch | H3 | 6.2 | 7.9 | 163.6 | one `terms` clause |
+| Elasticsearch | S2 | 4.3 | 8.4 | 109.8 | one `bool.should` of ranges |
 
-Every cell lookup above is a single round trip except the last row — and that
-one exception explains most of what's interesting here.
+Every cell lookup above is a single round trip except Aerospike's S2 row — and
+that one exception explains most of what's interesting here.
+
+The Elasticsearch rows look bad and are the most misleading numbers in the
+table. Nearly all of that time is shipping 7,438 documents back as JSON, not
+finding them. Part 5, lesson 6.
 
 ### How much work was wasted?
 
@@ -273,21 +300,30 @@ differs between them is how fast they can hand those 186 rows over.
 
 ### Was anything wrong?
 
-Almost nothing. Every method returned the exactly correct set of shops, at every
-radius, with one exception: **Redis missed 3 shops out of 7,438** at the 10 km
-search. More on why in Part 5 — it's not the reason you'd guess.
+Almost nothing. Every method in all four databases returned the exactly correct
+set of shops, at every radius, with one exception: **Redis missed 3 shops out of
+7,438** at the 10 km search. More on why in Part 5 — it's not the reason you'd guess.
 
 ### "Find me the nearest 10"
 
 | Database | Time | Correct? | How it's done |
 |---|---|---|---|
-| Postgres | 4.0 ms | yes | one line of SQL, built in |
-| Redis | 1.4 ms | yes | hand-written loop |
-| Aerospike | 4.3 ms | yes | hand-written loop |
+| Postgres | 3.2 ms | yes | one line of SQL, built in |
+| Redis | 1.3 ms | yes | hand-written loop |
+| Aerospike | 3.4 ms | yes | hand-written loop |
+| Elasticsearch | 3.7 ms | yes | `sort: _geo_distance` — exact, but a full scan |
 
 Postgres has a real nearest-neighbour search. Redis and Aerospike don't, so
 both have to fake it: search 200 m, did we find 10? No — try 400 m. Still no —
 800 m. Keep doubling, then sort what you got.
+
+Elasticsearch is a third case, and the most deceptive: one clean query, an exact
+answer, and no index involved at all. `sort: _geo_distance` computes the
+distance for all 20,000 documents and sorts them. It looks fine at this size and
+does not scale — a real system would put a `geo_distance` filter in front of it,
+which is the expanding-radius trick again, just written more nicely. (The `knn`
+section of the Elasticsearch API is for `dense_vector` similarity, not geo. Easy
+and common thing to confuse.)
 
 That works fine in a dense city and falls apart in the countryside, where you
 might double eight times before finding anything. It's also code *you* have to
@@ -295,7 +331,7 @@ write, test and get right, in every service that needs it.
 
 ---
 
-## Part 5 — The five things worth remembering
+## Part 5 — The six things worth remembering
 
 ### 1. Round trips are the whole game, and the data layout decides how many you make
 
@@ -309,6 +345,11 @@ All three can — but only if you ask the way each one wants to be asked:
 | Postgres | `WHERE h3_cell = ANY(<547 values>)` — one query | 74 ms |
 | Redis | `SUNION` over 547 keys — one command | 36 ms |
 | Aerospike | `batch_read` of 547 keys — one call | 15 ms |
+| Elasticsearch | `terms` clause with 547 values — one query | 164 ms |
+
+Elasticsearch takes the whole k-ring in one `terms` clause, ceiling 65,536
+values. It is last in this table for reasons that have nothing to do with the
+lookup — lesson 6.
 
 The Aerospike row is the one that took a rethink. The obvious translation of
 "store the cell ID and search it" is a secondary index on a bin — and Aerospike
@@ -350,6 +391,11 @@ everything fits in one round trip anyway, having 17x fewer things in that round
 trip barely registers. At 10 km, Postgres reads 547 H3 cells in 74 ms and 32 S2
 ranges in 54 ms. Real, but not the landslide the 17x suggests.
 
+Elasticsearch behaves like Postgres here — it takes 32 range clauses in one
+`bool.should`, and the S2 row beats the H3 row (110 ms vs 164 ms) because 32
+range clauses are less query-parsing and less postings-list work than 547 exact
+terms.
+
 And on Aerospike it **reverses**:
 
 | Aerospike, 10 km | Lookups | Time |
@@ -371,6 +417,9 @@ usual pitch for S2:
 - **H3 wins** on pure key-value stores, precisely *because* its cells are
   enumerable keys. Also for neighbour and ring analysis, since all its cells are
   the same size.
+
+Three of the four databases here can batch ranges; one cannot. That split, not
+the cell geometry, is what decides the winner.
 
 Pick the scheme that matches how your database likes to be read, not the one
 with the better-sounding cell count.
@@ -412,6 +461,16 @@ Both discrepancies that did show up were about geometry, not indexing:
   *indexing* rather than geography. `compare.py` prints the difference as its
   own separate table.
 
+- **Elasticsearch has the same knob, and it made no difference here.**
+  `geo_distance` takes `distance_type: arc` (Haversine, the default) or `plane`
+  (flat-earth, cheaper). Same query, same answers at 100 m, 1 km *and* 10 km —
+  delta zero at every radius. `plane` is accurate while the search area is small
+  relative to the curvature it ignores, and 10 km at 13° latitude is well inside
+  that. Push the radius into the hundreds of kilometres, or run it near a pole,
+  and it falls apart. `compare.py` prints this table too, and printing a row of
+  zeroes is the useful part: the knob exists, and knowing *when* it stops being
+  free is the actual skill.
+
 **The lesson worth carrying out of here:** when two systems disagree about
 points near your boundary, suspect the earth model before you suspect the index.
 Everyone loses an afternoon to this once.
@@ -427,6 +486,45 @@ neighbours. At 10 km that 3×3 block of boxes is *vastly* bigger than your
 circle. Turn on "Geohash boxes" in the UI at any radius and the orange
 rectangles will dwarf your circle — that picture is the 49 ms.
 
+
+### 6. Elasticsearch's time went almost entirely into *returning* the rows, not finding them
+
+The 10 km Elasticsearch numbers (109–164 ms) are the worst in the POC, and taken
+at face value they say the BKD tree is slow. It isn't. Same query, same index,
+only the amount of data sent back changes:
+
+| 10 km `geo_distance` query | Time |
+|---|---|
+| `_count` — match everything, return only the number | **2.7 ms** |
+| `size: 1` — match everything, return one document | 5.7 ms |
+| Full result — all 7,438 documents | 87.3 ms |
+
+Matching 7,438 of 20,000 documents costs under 3 ms. Handing them over costs
+another 85. That is JSON serialisation, HTTP, and the fact that 7,438 rows do
+not fit in one response — the reads here page with `search_after`, because the
+default `from`/`size` window stops at 10,000 and `from: 10000` is a bad idea
+long before that.
+
+This is not a flaw, it's the design. Elasticsearch is built to rank documents
+and return **the top N of them** — a page of search results, or an aggregation
+computed server-side. "Give me all 7,438 matching rows" is the one access
+pattern it is least suited to, and it is exactly what this POC asks of every
+store.
+
+Two things follow, and both are load-bearing in an interview:
+
+- **Compare like for like.** The Postgres and Aerospike numbers include their
+  rows crossing the wire too, but through binary protocols rather than JSON over
+  HTTP. Part of the gap is genuinely the protocol.
+- **Ask what the query is for.** If the answer feeds a map viewport, you want
+  the nearest 50 and a count — Elasticsearch does that in ~3 ms and the ranking
+  above is meaningless. If you genuinely need every row, you would reach for
+  `_count` plus aggregations, or a different store.
+
+The general version: **a benchmark measures the access pattern you wrote, not
+the database.** Write the pattern a store is worst at and you will reliably
+"prove" it is slow.
+
 ---
 
 ## Part 6 — The files
@@ -440,6 +538,7 @@ Python (the backend):
 | `postgres_geo.py` | Postgres: built-in spatial search, plus H3 and S2 on plain columns |
 | `redis_geo.py` | Redis: `GEOSEARCH`, plus H3 and S2 using ordinary Redis data structures |
 | `aerospike_geo.py` | Aerospike: its geo index, S2 on a plain numeric bin, and H3 stored inverted — cell ID as the primary key, read with `batch_read` |
+| `elastic_geo.py` | Elasticsearch: `geo_point` on a BKD tree, plus H3 as a `keyword` and S2 as a `long`, paged with `search_after` |
 | `h3_layer.py` | Works out which hexagons cover a circle |
 | `s2_layer.py` | Works out which S2 cells cover a circle, and converts them to number ranges |
 | `geohash_layer.py` | A small geohash implementation, used only to *draw* what Redis searches |
@@ -447,11 +546,12 @@ Python (the backend):
 | `maps.py` | Writes standalone HTML maps of the three cell shapes |
 | `api.py` | The HTTP API the web UI talks to |
 
-The three database files deliberately expose the same handful of methods
+The four database files deliberately expose the same handful of methods
 (`load_data`, `radius_query`, `knn_query`, `h3_radius_query`, `s2_radius_query`),
 which is what lets `compare.py` and the API treat them interchangeably. What
 differs is *how* each implements them — `h3_radius_query` is a `SUNION` in Redis,
-an `= ANY` in Postgres and a `batch_read` in Aerospike — and each store advertises
+an `= ANY` in Postgres, a `batch_read` in Aerospike and a `terms` clause in
+Elasticsearch — and each store advertises
 the methods it actually has, so the comparison table and the UI pick them up
 rather than having them hardcoded.
 
@@ -473,10 +573,11 @@ everything regenerates from the scripts.
 
 ## A caveat on the numbers
 
-These timings include Python overhead and come from three containers sharing one
+These timings include Python overhead and come from four containers sharing one
 laptop. They are honest for comparing the *methods against each other on the
 same machine*, which is the whole point. They are **not** benchmarks of how fast
-Postgres, Redis or Aerospike are — don't quote them as such.
+Postgres, Redis, Aerospike or Elasticsearch are — don't quote them as such, and
+see lesson 6 for how badly that can mislead.
 
 Useful flags:
 

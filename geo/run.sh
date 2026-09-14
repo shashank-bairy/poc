@@ -8,6 +8,7 @@ docker compose up -d
 until docker exec geo-postgis pg_isready -U postgres -d geo >/dev/null 2>&1; do sleep 1; done
 until docker exec geo-redis redis-cli ping >/dev/null 2>&1; do sleep 1; done
 until docker exec geo-aerospike asinfo -v build >/dev/null 2>&1; do sleep 1; done
+until curl -fs http://localhost:9201/_cluster/health >/dev/null 2>&1; do sleep 2; done
 
 echo "==> python deps"
 uv sync --quiet
