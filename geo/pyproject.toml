@@ -1,0 +1,24 @@
+[project]
+name = "geo-poc"
+version = "0.1.0"
+description = "Geospatial indexing POC: Redis vs Aerospike vs PostGIS, plus H3/S2"
+readme = "README.md"
+authors = [
+    { name = "Shashank Bairy R", email = "shashank.bairy04@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "aerospike>=19.2.2",
+    "fastapi>=0.141.1",
+    "folium>=0.20.0",
+    "h3>=4.5.0",
+    "haversine>=2.9.0",
+    "psycopg2-binary>=2.9.13",
+    "redis>=8.1.0",
+    "s2sphere>=0.2.5",
+    "uvicorn[standard]>=0.53.0",
+]
+
+
+[tool.uv]
+package = false

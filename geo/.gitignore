@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+maps/
+points.csv
+ui/node_modules/
+ui/dist/

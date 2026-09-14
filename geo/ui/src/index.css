@@ -1,0 +1,199 @@
+:root {
+  --bg: #0e1116;
+  --panel: #161a22;
+  --panel-2: #1d222c;
+  --line: #2a3039;
+  --text: #e6e9ef;
+  --muted: #98a0ae;
+  --accent: #00e5ff;
+  --good: #1fa97d;
+  --warn: #ffb020;
+  --danger: #ff5c5c;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; margin: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  height: 100%;
+}
+
+.sidebar {
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  padding: 20px 18px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sidebar header h1 {
+  font-size: 20px;
+  margin: 0 0 6px;
+  letter-spacing: -0.01em;
+}
+
+.sidebar header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.panel {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.panel h2 {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.hint { margin: 0; color: var(--muted); font-size: 12px; }
+.error { margin: 0; color: var(--danger); font-size: 13px; word-break: break-word; }
+
+.field { display: flex; flex-direction: column; gap: 7px; }
+.field > span { font-size: 13px; }
+.field em { font-style: normal; color: var(--accent); font-weight: 600; }
+
+.segmented { display: flex; gap: 4px; }
+
+.segmented button {
+  flex: 1;
+  padding: 7px 4px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.segmented button.on { background: var(--accent); border-color: var(--accent); color: #06222a; font-weight: 600; }
+.segmented button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.stack { display: flex; flex-direction: column; gap: 5px; }
+
+.row-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.row-btn span { font-size: 11.5px; color: var(--muted); }
+.row-btn.on { border-color: var(--accent); background: rgba(0, 229, 255, 0.09); }
+
+input[type='range'] { width: 100%; accent-color: var(--accent); }
+
+.ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer; }
+.check i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+button.ghost, button.primary {
+  padding: 8px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 13px;
+  border: 1px solid var(--line);
+}
+
+button.ghost { background: transparent; color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #06222a; font-weight: 700; }
+button.primary:disabled { opacity: 0.6; cursor: wait; }
+
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+.stat {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.stat-value { font-size: 19px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.stat-sub { font-size: 11px; color: var(--muted); }
+.stat.good .stat-value { color: var(--good); }
+.stat.warn .stat-value { color: var(--warn); }
+
+.legend { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--muted); }
+.legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 7px; }
+
+.cmp { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.cmp th { text-align: left; color: var(--muted); font-weight: 500; padding: 5px 4px; border-bottom: 1px solid var(--line); }
+.cmp td { padding: 5px 4px; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
+.cmp td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cmp td { white-space: nowrap; }
+.cmp tr.best td { color: var(--good); font-weight: 600; }
+
+.spinner {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.map-wrap { position: relative; }
+.map { height: 100%; width: 100%; background: #0b0e13; }
+
+/* OpenStreetMap only ships light tiles. Inverting and re-rotating the hue turns
+   them dark without needing a keyed tile provider; overlays sit in a different
+   pane so their colours are untouched. */
+.leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) grayscale(0.85) brightness(0.78) contrast(1.05);
+}
+.leaflet-container { font: inherit; }
+
+.leaflet-tooltip {
+  background: #11151c;
+  border: 1px solid var(--line);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.leaflet-tooltip::before { display: none; }
+
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: auto 60vh; }
+  .sidebar { border-right: none; border-bottom: 1px solid var(--line); }
+}
