@@ -1,0 +1,12 @@
+scifact: 5,183 docs, 300 judged queries, 339 judgements
+
+== relevance on scifact, k=10 ==
+engine         nDCG@10  recall@10  MRR     ms/query  notes      
+-------------  -------  ---------  ------  --------  -----------
+elasticsearch  0.6684   0.8013     0.6316  3.03      300 queries
+dense          0.6478   0.7900     0.6055  18.42     300 queries
+hybrid         0.7076   0.8401     0.6700  40.18     300 queries
+
+Read it in two places:
+  postgres vs the rest          -- ts_rank has no IDF term, no length normalization
+  redis-tfidf vs -bm25 vs -bm25std -- identical index, one scorer flag apart

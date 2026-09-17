@@ -1,0 +1,106 @@
+corpus: 200,000 docs from /Users/shashankbairy/os/poc/search/data/arxiv/docs.jsonl
+
+== index build  (raw text 208.5 MB) ==
+engine          docs     build  index size  vs corpus  notes                                                     
+--------------  -------  -----  ----------  ---------  ----------------------------------------------------------
+postgres        200,000  53.5s  108.4 MB    0.52x      insert 40.6s + index 12.9s; indexes 114 MB of 592 MB total
+redis[bm25std]  200,000  37.3s  220.1 MB    1.06x      in RAM; inverted 220.1 MB, records 25929091               
+lucene          200,000  15.3s  189.8 MB    0.91x      forceMerge(1), BM25Similarity, EnglishAnalyzer            
+elasticsearch   200,000  45.9s  230.3 MB    1.10x      1 segment(s) after forcemerge                             
+opensearch      200,000  35.8s  181.9 MB    0.87x      1 segment(s); same bodies as ES                           
+solr            200,000  21.6s  212.0 MB    1.02x      after optimize                                            
+
+== latency, 20 warm runs per cell ==
+query           engine          count ms  fetch ms  p95 ms  hits                          
+--------------  --------------  --------  --------  ------  ------------------------------
+1 term          postgres        2.42      11.85     13.25        4184 matched, 10 returned
+1 term          redis[bm25std]  1.16      2.63      3.56         4193 matched, 10 returned
+1 term          lucene          1.36      2.04      4.77         4076 matched, 10 returned
+1 term          elasticsearch   1.53      1.66      2.68         4076 matched, 10 returned
+1 term          opensearch      3.57      4.48      8.08         4076 matched, 10 returned
+1 term          solr            2.36      2.77      4.82         4076 matched, 10 returned
+2 phrase        postgres        3.75      5.29      7.95          738 matched, 10 returned
+2 phrase        redis[bm25std]  0.98      2.17      2.72          614 matched, 10 returned
+2 phrase        lucene          1.47      2.79      21.54         730 matched, 10 returned
+2 phrase        elasticsearch   1.60      2.55      6.06          730 matched, 10 returned
+2 phrase        opensearch      1.80      3.21      5.84          730 matched, 10 returned
+2 phrase        solr            1.43      2.04      5.99          730 matched, 10 returned
+3 boolean       postgres        1.20      2.10      2.62          159 matched, 10 returned
+3 boolean       redis[bm25std]  1.25      2.65      9.39          160 matched, 10 returned
+3 boolean       lucene          1.52      2.68      4.41          149 matched, 10 returned
+3 boolean       elasticsearch   1.20      2.46      2.98          149 matched, 10 returned
+3 boolean       opensearch      2.93      3.99      4.94          149 matched, 10 returned
+3 boolean       solr            2.16      2.78      10.64         149 matched, 10 returned
+4 prefix        postgres        11.66     115.65    366.38      15766 matched, 10 returned
+4 prefix        redis[bm25std]  3.99      4.10      6.06        15773 matched, 10 returned
+4 prefix        lucene          0.94      1.66      2.24        15440 matched, 10 returned
+4 prefix        elasticsearch   1.86      6.88      11.92       15440 matched, 10 returned
+4 prefix        opensearch      2.10      5.05      14.19       15440 matched, 10 returned
+4 prefix        solr            2.14      2.28      3.18        15440 matched, 10 returned
+5 fuzzy         postgres        41.40     51.75     54.97        1740 matched, 10 returned
+5 fuzzy         redis[bm25std]  8.39      7.45      8.61         8953 matched, 10 returned
+5 fuzzy         lucene          5.85      5.88      6.67        14492 matched, 10 returned
+5 fuzzy         elasticsearch   1.94      7.16      16.23       14492 matched, 10 returned
+5 fuzzy         opensearch      13.17     7.00      15.18       14492 matched, 10 returned
+5 fuzzy         solr            2.53      2.37      6.93        14492 matched, 10 returned
+6 filter+text   postgres        6.82      13.33     16.38        1452 matched, 10 returned
+6 filter+text   redis[bm25std]  4.13      4.92      6.39         1454 matched, 10 returned
+6 filter+text   lucene          1.21      2.29      3.47         1430 matched, 10 returned
+6 filter+text   elasticsearch   1.42      3.53      5.50         1430 matched, 10 returned
+6 filter+text   opensearch      1.64      5.81      13.08        1430 matched, 10 returned
+6 filter+text   solr            2.34      3.44      4.07         1430 matched, 10 returned
+7 facet         postgres        2.28      13.16     15.48        4184 matched, 10 returned
+7 facet         redis[bm25std]  1.17      2.05      2.68         4193 matched, 10 returned
+7 facet         lucene          0.80      3.42      7.41         4076 matched, 10 returned
+7 facet         elasticsearch   3.20      4.09      10.67        4076 matched, 10 returned
+7 facet         opensearch      1.33      3.66      5.96         4076 matched, 10 returned
+7 facet         solr            2.94      2.69      3.82         4076 matched, 10 returned
+8 sort by date  postgres        2.27      1.58      5.15         4184 matched, 10 returned
+8 sort by date  redis[bm25std]  0.91      3.94      5.63         4193 matched, 10 returned
+8 sort by date  lucene          0.77      1.40      1.61         4076 matched, 10 returned
+8 sort by date  elasticsearch   1.18      2.44      3.24         4076 matched, 10 returned
+8 sort by date  opensearch      1.44      2.63      3.34         4076 matched, 10 returned
+8 sort by date  solr            1.28      1.33      1.46         4076 matched, 10 returned
+9 deep page     postgres        95.05     174.85    303.50      37277 matched, 10 returned
+9 deep page     redis[bm25std]  6.06      14.03     16.82       37295 matched, 10 returned
+9 deep page     lucene          0.92      5.37      18.19       35772 matched, 10 returned
+9 deep page     elasticsearch   1.31      6.44      7.56        35772 matched, 10 returned
+9 deep page     opensearch      2.15      6.35      8.22        35772 matched, 10 returned
+9 deep page     solr            2.16      7.64      12.38       35772 matched, 10 returned
+10 highlight    postgres        7.34      114.23    137.90      13256 matched, 10 returned
+10 highlight    redis[bm25std]  2.50      3.91      5.80        13264 matched, 10 returned
+10 highlight    lucene          0.97      4.29      5.70        13102 matched, 10 returned
+10 highlight    elasticsearch   1.27      7.30      10.67       13102 matched, 10 returned
+10 highlight    opensearch      1.79      6.96      61.43       13102 matched, 10 returned
+10 highlight    solr            2.30      5.77      11.30       13102 matched, 10 returned
+11 boosted      postgres        153.50    234.98    307.10      74880 matched, 10 returned
+11 boosted      redis[bm25std]  12.04     16.84     18.15       74906 matched, 10 returned
+11 boosted      lucene          1.02      3.35      4.79        74902 matched, 10 returned
+11 boosted      elasticsearch   1.35      4.23      8.96        74902 matched, 10 returned
+11 boosted      opensearch      1.33      3.34      5.35        74902 matched, 10 returned
+11 boosted      solr            2.10      2.22      6.13        74902 matched, 10 returned
+
+== facets on 'retrieval' (multi-valued: counts sum past the hit count) ==
+engine          top categories                                         
+--------------  -------------------------------------------------------
+postgres        cs.CV:1207, cs.IR:1180, cs.CL:566, cs.LG:534, cs.IT:383
+redis[bm25std]  cs.CV:1212, cs.IR:1182, cs.CL:568, cs.LG:537, cs.IT:383
+lucene          cs.CV:1195, cs.IR:1137, cs.CL:554, cs.LG:532, cs.IT:363
+elasticsearch   cs.CV:1195, cs.IR:1137, cs.CL:554, cs.LG:532, cs.IT:363
+opensearch      cs.CV:1195, cs.IR:1137, cs.CL:554, cs.LG:532, cs.IT:363
+solr            cs.CV:1195, cs.IR:1137, cs.CL:554, cs.LG:532, cs.IT:363
+
+== top-10 overlap with the leftmost engine that answered ==
+query           postgres  redis[bm25std]  lucene  elasticsearch  opensearch  solr 
+--------------  --------  --------------  ------  -------------  ----------  -----
+1 term          --        2/10            4/10    3/10           3/10        4/10 
+2 phrase        --        3/10            6/10    6/10           6/10        6/10 
+3 boolean       --        4/10            2/10    2/10           2/10        2/10 
+4 prefix        --        0/10            0/10    1/10           1/10        0/10 
+5 fuzzy         --        0/10            0/10    0/10           0/10        0/10 
+6 filter+text   --        2/10            2/10    2/10           2/10        2/10 
+7 facet         --        2/10            4/10    3/10           3/10        4/10 
+8 sort by date  --        2/10            10/10   9/10           2/10        10/10
+9 deep page     --        0/10            0/10    0/10           0/10        0/10 
+10 highlight    --        2/10            1/10    1/10           1/10        1/10 
+11 boosted      --        3/10            1/10    1/10           1/10        1/10 

@@ -1,0 +1,65 @@
+# Ports are deliberately offset from the geo POC's (55432/6380/9201) so both
+# POCs can run at the same time.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: search-postgres
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: search
+    ports: ["55433:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d search"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    # Redis 8 has the query engine (ex-RediSearch) and vector sets in core,
+    # so no redis-stack image is needed any more.
+    image: redis:8-alpine
+    container_name: search-redis
+    ports: ["6381:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    container_name: search-elastic
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ports: ["9202:9200"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      retries: 40
+
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    container_name: search-opensearch
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ports: ["9203:9200"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      retries: 40
+
+  solr:
+    image: solr:9.7
+    container_name: search-solr
+    ports: ["8984:8983"]
+    # Schemaless mode would guess field types from the first document; the POC
+    # defines the schema explicitly instead (solr_search.py), because
+    # schema-first is the whole point of Solr's culture.
+    command: ["solr-precreate", "papers"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8983/solr/admin/info/system || exit 1"]
+      interval: 5s
+      retries: 40
