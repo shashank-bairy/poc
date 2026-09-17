@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+data/
+lucene_raw/lib/
+lucene_raw/index/
+lucene_raw/*.class

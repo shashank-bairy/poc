@@ -1,0 +1,27 @@
+[project]
+name = "search-poc"
+version = "0.1.0"
+description = "Search POC: Postgres FTS, Redis, raw Lucene, Elasticsearch, OpenSearch, Solr, plus embeddings and hybrid RRF"
+readme = "README.md"
+authors = [
+    { name = "Shashank Bairy R", email = "shashank.bairy04@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "elasticsearch>=8.15,<9",
+    "opensearch-py>=2.7",
+    "psycopg2-binary>=2.9.13",
+    "pysolr>=3.9",
+    "redis>=6.0",
+    "requests>=2.32",
+    "numpy>=2.0",
+    "kaggle>=2.2.4",  # corpora/arxiv.py only; auth via ~/.kaggle/access_token
+]
+
+[project.optional-dependencies]
+# Phase 2 only. ~2 GB of torch, so it is not in the default install.
+embed = [
+    "sentence-transformers>=3.0",
+]
+[tool.uv]
+package = false
