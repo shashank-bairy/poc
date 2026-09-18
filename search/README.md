@@ -1,20 +1,64 @@
-# Search POC — Postgres FTS, Redis, raw Lucene, Elasticsearch, OpenSearch, Solr (+ hybrid)
+# Search POC — six stores, one corpus, the same eleven queries
 
-Design brief: [`search-poc.md`](./search-poc.md). Mechanics in plain language:
-[`HOW-IT-WORKS.md`](./HOW-IT-WORKS.md). Measurements, per-engine behaviour and
-the traps: [`FINDINGS.md`](./FINDINGS.md).
+Six ways to search the same 200,000 arXiv papers, written so the query syntax
+of each engine is readable directly. One library, three wrappers, two
+outsiders: **Lucene** is the engine, **Elasticsearch** / **OpenSearch** /
+**Solr** are servers wrapped around that same library, and **Postgres FTS**
+(`tsvector` + GIN) and **Redis** (its own in-memory inverted index) are
+separate implementations.
 
-One library, three wrappers, two outsiders. **Lucene** is the engine;
-**Elasticsearch**, **OpenSearch** and **Solr** are servers around that same
-library; **Postgres FTS** (`tsvector` + GIN) and **Redis** (its own in-memory
-inverted index) are separate implementations. The POC runs the same corpus and
-the same eleven-query suite through all six, then scores relevance against human
-judgements rather than opinion.
+## Start here
+
+**Open any file in [`engines/`](./engines).** Each is a flat list of functions —
+`q1_term()`, `q2_phrase()`, … `q11_boosted()` — with the query written out
+inside, in that engine's own syntax. No dicts, no config files, no lookup by
+name:
+
+```python
+def q5_fuzzy(self):
+    # Trigrams, not lexemes: tsvector cannot do edit distance at all,
+    # so this goes through a completely separate index (pg_trgm).
+    return self.search("""
+        SELECT id, word_similarity('transfomer', title) AS score, title, '' AS hl
+        FROM docs
+        WHERE 'transfomer' <% title
+        ORDER BY score DESC
+        LIMIT 10
+    """)
+```
+
+Run any engine on its own. It indexes a small corpus, prints **what that engine
+physically stored** for one document, then every query with its source and its
+results:
+
+```bash
+uv run python -m engines.postgres     # or .redis .lucene .elasticsearch .opensearch .solr
+```
+
+Captured output for all six is in [`results/`](./results) if you want to read
+before running anything.
+
+## What each store actually holds
+
+That first block is the part worth comparing. The same document, six shapes:
+
+| engine | stored as | searched against |
+|---|---|---|
+| postgres | the row: `text`, `text[]`, `date` | a generated `tsvector` column in the same row |
+| redis | a HASH at `doc:<id>` — no arrays, no dates | a separate index Redis maintains over the key prefix |
+| lucene | stored fields, verbatim | the terms the `Analyzer` emitted |
+| elasticsearch | `_source`, the JSON you sent | per-field analyzer output (`text` stems, `keyword` does not) |
+| opensearch | same as Elasticsearch | same as Elasticsearch |
+| solr | the stored document | `text_en`, a chain you can print stage by stage |
+
+Two things in every one of them: the original text, kept so it can be shown
+back to you, and a derived form that is the only thing a query can match. The
+demo prints both side by side.
 
 ## Running it
 
 ```bash
-./run.sh                      # services, jars, BEIR data, both comparison passes
+./run.sh                      # services, jars, then all six engines in turn
 ```
 
 Or by hand:
@@ -22,94 +66,80 @@ Or by hand:
 ```bash
 docker compose up -d
 uv sync
-./lucene_raw/fetch_jars.sh              # Lucene + gson from Maven Central
-uv run python -m corpora.beir           # SciFact: corpus, queries, judgements
-uv run python -m bench.compare --docs data/beir/scifact/docs.jsonl   # performance
-uv run python -m bench.evaluate                                      # relevance
+./lucene_raw/fetch_jars.sh    # Lucene + gson from Maven Central
+uv run python -m corpora.arxiv --limit 200000
+uv run python -m engines.postgres
 ```
 
-The arXiv corpus needs a Kaggle account and an API token — this will block a
-fresh clone, so it is first here rather than buried:
+The corpus needs a Kaggle account and an API token, so it is first here rather
+than buried:
 
 ```bash
 # Kaggle -> Settings -> API -> Create New Token, then chmod 600 the file:
 #   ~/.kaggle/kaggle.json     (username + key), or
 #   ~/.kaggle/access_token    (the newer KGAT_ form)
 uv run python -m corpora.arxiv --limit 200000   # 1.8 GB download, CS subset
-uv run python -m bench.compare                  # the real performance pass
 ```
 
-Phase 2 pulls in ~2 GB of torch, so it is opt-in:
+Vector search (`vector_search()` on every engine) needs embeddings, which pull
+in ~2 GB of torch, so they are opt-in:
 
 ```bash
 uv sync --extra embed
-uv run python -m bench.evaluate --engines elasticsearch,dense,hybrid
+uv run python -m core.embed --limit 20000
 ```
 
 Ports are offset from the geo POC's so both can run at once: Postgres 55433,
 Redis 6381, Elasticsearch 9202, OpenSearch 9203, Solr 8984. Data and the Lucene
 jars are gitignored and regenerate from the scripts.
 
-## Results
+## Measured, once, on 200k documents
 
-Full measurements, per-engine behaviour and the traps hit along the way:
-**[`FINDINGS.md`](./FINDINGS.md)**. Raw output in `results/`.
+The benchmark harness has been removed — this POC is about the data model and
+the query syntax, not the measurement. The numbers it produced are kept here as
+a record, with the full write-up in [`FINDINGS.md`](./FINDINGS.md):
 
-Performance is measured on 200k arXiv CS papers, relevance on BEIR SciFact
-(arXiv ships no relevance judgements). The headline:
-
-| engine | nDCG@10 · SciFact | build · 200k | q11 boosted p50 | index size |
+| engine | build · 200k | index size | 1-term p50 | 4-prefix p50 |
 |---|---|---|---|---|
-| postgres | 0.3620 | 53.5s | 234.98 ms | 108 MB (0.52x) |
-| redis (bm25std) | 0.6549 | 37.3s | 16.84 ms | 220 MB RAM (1.06x) |
-| lucene | 0.6684 | 15.3s | 3.35 ms | 190 MB (0.91x) |
-| elasticsearch | 0.6684 | 45.9s | 4.23 ms | 230 MB (1.10x) |
-| opensearch | 0.6684 | 35.8s | 3.34 ms | 182 MB (0.87x) |
-| solr | 0.6668 | 21.6s | 2.22 ms | 212 MB (1.02x) |
+| postgres | 50.7s | 108 MB (0.52x) | 12.02 ms | 114.24 ms |
+| redis | 31.3s | 220 MB RAM (1.06x) | 2.59 ms | 4.29 ms |
+| lucene | 14.8s | 190 MB (0.91x) | 5.63 ms | 1.74 ms |
+| elasticsearch | 34.8s | 230 MB (1.10x) | 2.59 ms | 5.32 ms |
+| opensearch | 31.3s | 231 MB (1.11x) | 3.46 ms | 4.07 ms |
+| solr | 20.6s | 212 MB (1.02x) | 1.65 ms | 1.93 ms |
 
-Five things that came out of it:
-
-1. Raw Lucene, Elasticsearch and OpenSearch score **identically** to four
-   decimals. The REST layer changes nothing about retrieval.
-2. Redis' scorer flag is worth **0.58 nDCG** — TFIDF (the default) 0.076 vs
-   BM25STD 0.655, same index, one parameter.
-3. Postgres ranks at 0.36 because `ts_rank` has no IDF term, and at 200k docs
-   it is 10-70x slower on any query touching many rows.
-4. Postgres faceting *works* (12 ms, correct counts). What it lacks is a facet
-   engine: cost tracks the match count instead of staying flat.
-5. Hybrid RRF beats both its inputs — BM25 0.668, dense 0.647, fused **0.708**.
+Postgres is 10-70x slower at 200k on any query touching many rows, and that is
+structural, not tuning. Elasticsearch and OpenSearch land within 1 MB of each
+other, because they are identical Lucene over identical documents.
 
 ## Layout
 
 ```
-docker-compose.yml       postgres(+pgvector), redis 8, elasticsearch, opensearch, solr
-core/common.py           Doc, the structural Query suite, SearchEngine protocol, timing
-core/embed.py            all-MiniLM-L6-v2 -> vectors
-corpora/arxiv.py         kaggle snapshot -> CS subset -> data/arxiv/docs.jsonl
-corpora/beir.py          SciFact/NFCorpus -> docs.jsonl + queries.jsonl + qrels.tsv
-engines/postgres.py      tsvector + GIN, pg_trgm, pgvector
-engines/redis.py         FT.CREATE, FT.SEARCH, FT.AGGREGATE, VECTOR with prefiltered KNN
-engines/lucene.py        driver for the JVM below
-engines/elasticsearch.py mapping vs analysis; every query body lives here
-engines/opensearch.py    the same bodies, a different client
-engines/solr.py          schema API, edismax, fq, facet.field
-engines/hybrid.py        RRF fusion, plus a dense-only baseline
-lucene_raw/Search.java   raw Lucene: IndexWriter, analyzers, BM25, facets, highlighting
-lucene_raw/fetch_jars.sh
-bench/compare.py         one corpus -> all engines -> latency + top-10 diff
-bench/evaluate.py        BEIR qrels -> nDCG@10, recall@10, MRR
-results/                 captured output from the runs quoted above
+engines/postgres.py        q1_term() ... q11_boosted(), SQL inside each    <- read these
+engines/redis.py           the same eleven, FT.SEARCH commands inside
+engines/lucene.py          the same eleven, QueryParser strings inside
+engines/elasticsearch.py   the same eleven, request bodies inside
+engines/opensearch.py      inherits all eleven unchanged; only vector_search differs
+engines/solr.py            the same eleven, select params inside
+
+docker-compose.yml         postgres(+pgvector), redis 8, elasticsearch, opensearch, solr
+core/common.py             Doc, corpus loading, the per-engine demo runner
+core/embed.py              all-MiniLM-L6-v2 -> vectors, for vector_search()
+corpora/arxiv.py           kaggle snapshot -> CS subset -> data/arxiv/docs.jsonl
+lucene_raw/Search.java     raw Lucene: IndexWriter, analyzers, facets, QueryParser
+results/                   captured output from each engine
+
+WALKTHROUGH.md             one document + one query traced through all six engines
+FINDINGS.md                how each store behaves, and the traps
+HOW-IT-WORKS.md            inverted indexes, analysis, segments -- the theory
 ```
 
-Everything runs as a module (`python -m bench.compare`) so the packages import
-cleanly; `corpora`, not `datasets`, because HuggingFace `datasets` arrives with
-the embedding extra and would shadow it.
+The eleven function names are identical across all six files, so `diff` shows
+the same question in six dialects.
 
-Two deviations from the brief's proposed layout, both deliberate: the Lucene
-driver sits in `engines/` with the other five while only the Java lives in
-`lucene_raw/`; and PyLucene was skipped in favour of a small JSON-over-HTTP JVM
-process, because a JCC build is a day of work that teaches nothing about
-Lucene. That bridge adds ~0.3-0.8 ms per query and is the only engine here
-whose latency includes a transport it does not need.
-
-What was left undone, and why, is at the end of [`FINDINGS.md`](./FINDINGS.md).
+Two deviations worth knowing: the Lucene driver sits in `engines/` with the
+other five while only the Java lives in `lucene_raw/`; and PyLucene was skipped
+in favour of a small JSON-over-HTTP JVM process, because a JCC build is a day
+of work that teaches nothing about Lucene. That bridge adds ~0.3-0.8 ms per
+query and is the only engine here whose latency includes a transport it does
+not need.

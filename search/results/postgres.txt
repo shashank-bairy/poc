@@ -1,0 +1,203 @@
+== postgres: indexing 5,000 docs
+   IndexStats(docs=5000, build_s=0.9868445419706404, size_bytes=4136960, notes='insert 0.7s + index 0.2s; indexes 4 MB of 14 MB total')
+
+========================================================================
+WHAT POSTGRES STORED for 0704.0002
+========================================================================
+title       Sparsity-certifying Graph Decompositions
+abstract    We describe a new algorithm, the $(k,\ell)$-pebble game with colors, and use it obtain a charact...
+categories  ['math.CO', 'cs.CG']          <- text[], a real array type
+update_date 2008-12-13          <- date, not a string
+tsv         'algorithm':10B,33B,117B,122B 'also':92B,111B 'appear':50B 'arbor':90B 'attent':58B 'base':100B 'certifi':3A,98B 'character':23B,88B 'color':17B,65B,108B 'concern':40B 'connect':113B 'decomposit':5A,42B,96B 'describ':7B ...
+
+========================================================================
+QUERY PATTERNS
+========================================================================
+
+---- 1-term ------------------------------------------------------------
+def q1_term(self):
+        # `@@` is the match operator and the only thing the GIN index serves.
+        # ORDER BY ts_rank runs afterwards, on every row that matched.
+        return self.search(f"""
+            SELECT id, ts_rank(tsv, q) AS score, title, '' AS hl
+            FROM docs, plainto_tsquery('english', 'retrieval') AS q
+            WHERE tsv @@ q
+            ORDER BY score DESC
+            LIMIT 10
+        """)
+   10 rows:
+     0803.3693      Succinct Data Structures for Retrieval and Approximate M
+     0705.0751      Approximate textual retrieval
+     0708.2788      Integrating users' needs into multimedia information ret
+     0711.4388      Contextual Information Retrieval based on Algorithmic In
+     0707.0745      Semantic Information Retrieval from Distributed Heteroge
+
+---- 2-phrase ----------------------------------------------------------
+def q2_phrase(self):
+        # phraseto_tsquery builds 'attention <-> mechanism' (FOLLOWED BY),
+        # which needs the positions to_tsvector already stores.
+        return self.search(f"""
+            SELECT id, ts_rank(tsv, q) AS score, title, '' AS hl
+            FROM docs, phraseto_tsquery('english', 'attention mechanism') AS q
+            WHERE tsv @@ q
+            ORDER BY score DESC
+            LIMIT 10
+        """)
+   (no rows)
+
+---- 3-boolean ---------------------------------------------------------
+def q3_boolean(self):
+        # & is AND, | is OR, ! is NOT. to_tsquery takes operators;
+        # plainto_tsquery would escape them into literal terms.
+        return self.search(f"""
+            SELECT id, ts_rank(tsv, q) AS score, title, '' AS hl
+            FROM docs, to_tsquery('english', 'retrieval & (dense | sparse) & !image') AS q
+            WHERE tsv @@ q
+            ORDER BY score DESC
+            LIMIT 10
+        """)
+   1 rows:
+     0712.2638      Towards Persistence-Based Reconstruction in Euclidean Sp
+
+---- 4-prefix ----------------------------------------------------------
+def q4_prefix(self):
+        # ':*' matches the term dictionary by prefix -- the only autocomplete
+        # mechanism here. No n-grams, no suggester.
+        return self.search(f"""
+            SELECT id, ts_rank(tsv, q) AS score, title, '' AS hl
+            FROM docs, to_tsquery('english', 'quant:*') AS q
+            WHERE tsv @@ q
+            ORDER BY score DESC
+            LIMIT 10
+        """)
+   10 rows:
+     0709.0289      Cryptography in the Bounded-Quantum-Storage Model
+     0712.1996      A case study of the difficulty of quantifier elimination
+     0705.2278      Unequal dimensional small balls and quantization on Gras
+     0806.1231      Improving Classical Authentication with Quantum Communic
+     0808.0059      Quantum walk based search algorithms
+
+---- 5-fuzzy -----------------------------------------------------------
+def q5_fuzzy(self):
+        # Trigrams, not lexemes: tsvector cannot do edit distance at all,
+        # because a misspelling is simply not a lexeme in the dictionary.
+        # '<%' is word similarity -- does 'transfomer' closely match some word
+        # inside the title? Plain '%' compares against the whole title string,
+        # and one word is never 30% similar to a ten-word title.
+        return self.search("""
+            SELECT id, word_similarity('transfomer', title) AS score, title, '' AS hl
+            FROM docs
+            WHERE 'transfomer' <% title
+            ORDER BY score DESC
+            LIMIT 10
+        """)
+   10 rows:
+     0802.4057      A Qualitative Modal Representation of Quantum Register T
+     0808.3281      On the diagonalization of the discrete Fourier transform
+     0712.3883      The generalized Levinger transformation
+     0802.1554      Fast Computation of Partial Fourier Transforms
+     0807.2387      Fast computation of magnetostatic fields by Non-uniform 
+
+---- 6-filter-text -----------------------------------------------------
+def q6_filter_text(self):
+        # One WHERE clause for both halves. Postgres has no filter context and
+        # no filter cache -- the planner just picks which index to lead with.
+        return self.search(f"""
+            SELECT id, ts_rank(tsv, q) AS score, title, '' AS hl
+            FROM docs, plainto_tsquery('english', 'graph neural') AS q
+            WHERE tsv @@ q
+              AND update_date >= DATE '2023-01-01'
+            ORDER BY score DESC
+            LIMIT 10
+        """)
+   (no rows)
+
+---- 8-sort-date -------------------------------------------------------
+def q8_sort_date(self):
+        # ORDER BY a btree column instead of by score: nothing is ranked.
+        return self.search("""
+            SELECT id, 0.0 AS score, title, '' AS hl
+            FROM docs, plainto_tsquery('english', 'retrieval') AS q
+            WHERE tsv @@ q
+            ORDER BY update_date DESC
+            LIMIT 10
+        """)
+   10 rows:
+     0708.4149      On the complexity of nonnegative matrix factorization
+     0808.2246      Comparing human and automatic thesaurus mapping approach
+     0806.2216      An Intelligent Multi-Agent Recommender System for Human 
+     0711.4388      Contextual Information Retrieval based on Algorithmic In
+     0807.4580      A Logical Model and Data Placement Strategies for MEMS S
+
+---- 9-deep-page -------------------------------------------------------
+def q9_deep_page(self):
+        # OFFSET 4990 ranks every matching row and throws 4,990 away. There is
+        # no search_after here; a keyset predicate is the closest equivalent
+        # and needs a stable unique sort key.
+        return self.search(f"""
+            SELECT id, ts_rank(tsv, q) AS score, title, '' AS hl
+            FROM docs, plainto_tsquery('english', 'learning') AS q
+            WHERE tsv @@ q
+            ORDER BY score DESC
+            LIMIT 10 OFFSET 4990
+        """)
+   (no rows)
+
+---- 10-highlight ------------------------------------------------------
+def q10_highlight(self):
+        # ts_headline re-analyzes the original abstract at query time, per
+        # returned row, with no index involved. That is why it dominates
+        # latency here.
+        return self.search(f"""
+            SELECT id,
+                   ts_rank(tsv, q) AS score,
+                   title,
+                   ts_headline('english', abstract, q, 'MaxWords=25,MinWords=10') AS hl
+            FROM docs, plainto_tsquery('english', 'knowledge distillation') AS q
+            WHERE tsv @@ q
+            ORDER BY score DESC
+            LIMIT 10
+        """)
+   (no rows)
+
+---- 11-boosted --------------------------------------------------------
+def q11_boosted(self):
+        # title^5 / abstract^1 as a weight array: B (abstract) 0.2 against
+        # A (title) 1.0 is the 5x. The labels are baked in at index time, the
+        # numbers are chosen here, so a boost change needs no reindex.
+        return self.search("""
+            SELECT id, ts_rank('{0.1, 0.2, 0.2, 1.0}', tsv, q) AS score, title, '' AS hl
+            FROM docs, plainto_tsquery('english', 'language model') AS q
+            WHERE tsv @@ q
+            ORDER BY score DESC
+            LIMIT 10
+        """)
+   10 rows:
+     0801.4716      Methods to integrate a language model with semantic info
+     0804.3599      Respect My Authority! HITS Without Hyperlinks, Utilizing
+     0711.1360      Analytical approach to bit-string models of language evo
+     0801.1658      Computational approach to the emergence and evolution of
+     0710.1481      What's in a Name?
+
+---- 7-facet ------------------------------------------------------------
+def q7_facet(self, top: int = 10) -> list[tuple[str, int]]:
+        # Not faceting: a runtime unnest + GROUP BY over every matching row.
+        # Correct, and the cost grows with the match count, where Lucene reads
+        # a precomputed doc-values column and stays flat.
+        rows = self._rows("""
+            SELECT f.v AS value, count(*) AS n
+            FROM docs, plainto_tsquery('english', 'retrieval') AS q, unnest(categories) AS f(v)
+            WHERE tsv @@ q
+            GROUP BY f.v
+            ORDER BY n DESC
+            LIMIT 10
+        """)
+        return [(r[0], int(r[1])) for r in rows][:top]
+     cs.IR          20
+     cs.DB          7
+     cs.DS          6
+     cs.HC          4
+     math.IT        4
+
+---- match count (no rows fetched) --------------------------------------
+     48 documents match

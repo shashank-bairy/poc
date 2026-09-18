@@ -1,7 +1,7 @@
 # How text search actually works
 
-A companion to [`search-poc.md`](./search-poc.md). That file says *what* to build; this one
-explains *how the six systems work underneath*, in plain words, starting from nothing.
+A companion to [`README.md`](./README.md). That file says what the POC is and how to run it; this
+one explains *how the six systems work underneath*, in plain words, starting from nothing.
 
 Read it top to bottom once. Part 1 is the machinery all six share — and it is most of the
 learning. Parts 2 onward are the six systems, and by then each one is mostly "which of these
@@ -107,50 +107,6 @@ This is the rule that catches everyone. If indexing produced `databas` but your 
 as `database`, you match nothing. **The query must go through the same analysis as the document.**
 
 Nearly every "why does my search return zero results" bug is a mismatch between these two paths.
-
-### Ranking: why one document beats another
-
-The intersection gave us documents that *match*. Now, which is best?
-
-Start with two observations anyone would make:
-
-**A word that appears more often in a document means that document is more about it.** That is
-**term frequency (TF)**.
-
-**A word that appears in every document tells you nothing.** `the` appears everywhere and separates
-nothing; `kubernetes` appears in six documents out of 500,000 and is enormously informative. That
-is **inverse document frequency (IDF)** — rare terms are worth more.
-
-Multiply them and you have **TF-IDF**, the classic score, and the default in Postgres and Redis.
-
-It has two real problems:
-
-- **TF grows without limit.** A document containing `rust` 500 times scores 100x one containing it
-  5 times. It is not 100 times more relevant — it is probably spam.
-- **Long documents win unfairly.** A 10,000-word page contains more of everything, so it
-  accumulates more TF by being long rather than by being good.
-
-**BM25 fixes exactly those two things**, and it is the default in Lucene (and therefore
-Elasticsearch, OpenSearch and Solr):
-
-```
-score(doc, term) = IDF(term) * ( tf * (k1 + 1) ) / ( tf + k1 * (1 - b + b * docLen / avgDocLen) )
-```
-
-Ignore the letters and read the behaviour:
-
-- **Saturation.** `tf / (tf + k1)` rises fast at first and then flattens. Going from 1 occurrence to
-  2 matters a lot; 50 to 51 barely registers. `k1` (≈1.2) sets how fast it flattens.
-- **Length normalization.** `docLen / avgDocLen` penalizes documents longer than average and
-  rewards shorter ones. `b` (≈0.75) sets how hard. Matching `rust` in a 6-word title is stronger
-  evidence than matching it in a 5,000-word article.
-
-That is the whole difference, and it is why "BM25 or not?" is a real dividing line between these
-systems rather than trivia.
-
-To make length normalization work, the index has to remember how long each field was. That stored
-number is called a **norm** — one byte per field per document, deliberately lossy, because
-"roughly how long" is all the formula needs.
 
 ### Positions, for phrase search
 
@@ -263,38 +219,6 @@ Two things worth knowing:
   occasional query pays for a big merge, and a query hitting the pending list must scan it linearly.
   A latency spike in Postgres FTS is usually this.
 
-### Ranking, and the honest limitation
-
-```sql
-SELECT id, ts_rank(tsv, query) AS rank
-FROM docs, websearch_to_tsquery('english', 'rust database') query
-WHERE tsv @@ query
-ORDER BY rank DESC
-LIMIT 10;
-```
-
-`ts_rank` uses term frequency and document length. **It does not use IDF**, because Postgres does
-not maintain corpus-wide document-frequency statistics for lexemes — there is no cheap way to ask
-"how many rows contain `rust`?" without counting.
-
-Consequence: in `rust database`, Postgres cannot know that `rust` is rarer and therefore more
-important. Lucene and Redis both can. **This is the single biggest quality gap** between Postgres
-FTS and a real search engine, and the right answer when an interviewer asks why you'd add
-Elasticsearch to a stack that already has Postgres.
-
-Two knobs soften it:
-
-- `ts_rank_cd` — "cover density", which rewards query terms appearing *close together*. Often
-  better than `ts_rank` on real text.
-- `setweight` — tag lexemes A/B/C/D by source field so a title match outranks a body match:
-  ```sql
-  setweight(to_tsvector('english', title), 'A') ||
-  setweight(to_tsvector('english', body),  'B')
-  ```
-
-Also note the query above **ranks every matching row** before `LIMIT 10`. There is no early
-termination: 8,000 matches means 8,000 rank computations to return ten.
-
 ### `pg_trgm`: typo tolerance, a completely different mechanism
 
 Stemming doesn't help with `kubernets`. `pg_trgm` handles it by ignoring words entirely and indexing
@@ -320,7 +244,7 @@ and typo correction usually want the second.
 | | |
 |---|---|
 | **Wins** | No new service. Search results join to your real tables transactionally. Consistent immediately — no refresh delay. Good enough for most internal tools and many products. |
-| **Loses** | No IDF, so ranking is materially worse. No faceting (`GROUP BY` over 8,000 matched rows is not the same thing). No built-in highlighting worth the name (`ts_headline` re-parses the document at query time and is slow). Scaling means scaling your primary database. |
+| **Loses** | No IDF in `ts_rank`. No facet engine (`GROUP BY` over 8,000 matched rows is not the same thing). No built-in highlighting worth the name (`ts_headline` re-parses the document at query time and is slow). Scaling means scaling your primary database. |
 
 ---
 
@@ -364,22 +288,6 @@ it. That is the sharpest contrast with everything Lucene-based in this document.
 The `TEXT` vs `TAG` split is exactly the `text` vs `keyword` distinction Elasticsearch makes, under
 different names — and the same trap. Index an author as `TEXT` and `@author:{alice smith}` fails,
 because the value was split into two tokens. Names, IDs, statuses, enums: always `TAG`.
-
-### Scoring
-
-`FT.SEARCH` defaults to **TF-IDF**, with the same missing-saturation problem described in Part 1. It
-is one word to change:
-
-```
-FT.SEARCH idx "@title:(rust database)" SCORER BM25 WITHSCORES
-```
-
-Available scorers: `TFIDF` (default), `TFIDF.DOCNORM`, `BM25` (and `BM25STD` on Redis 8), `DISMAX`,
-`DOCSCORE`, `HAMMING`. Running the same query twice with `TFIDF` and then `BM25` and diffing the top
-ten is a ten-minute exercise that teaches more about ranking than any amount of reading.
-
-Redis also lets a document carry a static importance multiplier (`DOCSCORE`), which is how you fold
-in things like popularity or recency.
 
 ### Faceting: `FT.AGGREGATE`
 
@@ -499,11 +407,6 @@ values beats decompressing 20,000 stored documents. The `_source: false` + `docv
 optimization in the geo POC's Elasticsearch store is exactly this, and it is worth understanding
 because the same trick appears everywhere.
 
-### Scoring
-
-BM25 has been the default since Lucene 6 (2016); before that it was a TF-IDF variant. It is
-pluggable per field via `Similarity`.
-
 ### The API, small enough to hold in your head
 
 ```java
@@ -566,17 +469,6 @@ so each shard resumes rather than recounting.
 **Shard count is decided at index creation and cannot be changed** (only reindexed). Too few, you
 can't spread load; too many, every query pays fixed per-shard overhead. One of the few genuinely
 irreversible decisions in the system.
-
-### The distributed IDF wrinkle
-
-IDF means "how rare is this term **in the corpus**?" But each shard only knows its own documents. By
-default, each shard computes IDF from its own statistics — so identical documents on differently
-composed shards can score slightly differently.
-
-With reasonably sized, randomly distributed shards this washes out. With few documents or skewed
-routing it doesn't. The fix is `search_type=dfs_query_then_fetch`, which adds a round trip to gather
-global term statistics first. Rarely worth it, and exactly the kind of thing that sounds like trivia
-until you're debugging inconsistent relevance.
 
 ### Mapping vs analysis
 
@@ -798,7 +690,7 @@ terser for the common case, and e-commerce faceted navigation is where Solr earn
 | **Default ranking** | `ts_rank` — **no IDF** | TF-IDF (BM25 selectable) | BM25 | BM25 | BM25 | BM25 |
 | **Analyzed vs exact** | `tsvector` vs plain column | `TEXT` vs `TAG` | `TextField` vs `StringField` | `text` vs `keyword` | `text` vs `keyword` | `text_general` vs `string` |
 | **Write visibility** | Immediate (transactional) | Immediate (synchronous) | On commit | ~1s refresh | ~1s refresh | ~1s soft commit |
-| **Faceting** | None | `FT.AGGREGATE` | Build it yourself | Aggregations | Aggregations | Facets / JSON Facet API |
+| **Faceting** | `GROUP BY`, no facet engine | `FT.AGGREGATE` | Build it yourself | Aggregations | Aggregations | Facets / JSON Facet API |
 | **Distribution** | Your Postgres story | Enterprise only | None | Built in | Built in | SolrCloud + ZooKeeper |
 | **Vectors** | `pgvector` | Built in, prefilterable | Built in (`KnnVectorField`) | `dense_vector` | k-NN plugin, free | Dense vector field |
 | **Operational cost** | Zero extra | One service you likely run already | A library, no service | A cluster | A cluster | A cluster + ZooKeeper |
@@ -813,9 +705,10 @@ quality, and it is the honest reason to add a search engine to a stack that alre
 Lucene-based makes you wait for a refresh. If your product needs "user edits a title, immediately
 searches for it, finds it", that is a real constraint, not a detail.
 
-**Faceting.** The clean dividing line. Postgres cannot do it. Everything else can, and all of them
-do it the same way underneath — a column-oriented copy of the field (doc values, or Redis' sortable
-fields).
+**Faceting.** Postgres *can* do it — `unnest` + `GROUP BY` returns correct counts in 12 ms on a
+4,000-row match. What it has no equivalent of is a facet engine: everything else keeps a
+column-oriented copy of the field (doc values, or Redis' sortable fields) and reads that, so their
+cost is flat while Postgres' tracks the match count.
 
 **Operational cost.** A cluster is a thing you run, monitor, upgrade and page someone about at 3 am.
 Being able to say "Postgres FTS is enough here, and here's the specific quality we give up" is a
@@ -824,7 +717,7 @@ stronger answer than reaching for Elasticsearch reflexively.
 ### How to actually choose
 
 - **Postgres FTS** — data's already there, moderate corpus, ranking quality isn't the product, and
-  you value one fewer service more than you value BM25.
+  you value one fewer service more than you value ranking quality.
 - **Redis** — already running Redis, need real ranking and faceting and low latency, the index fits
   in RAM, and synchronous write visibility is worth something.
 - **Elasticsearch / OpenSearch** — search *is* the product, or you need faceting, highlighting,
@@ -863,8 +756,3 @@ stronger answer than reaching for Elasticsearch reflexively.
 | **Scatter-gather** | Fan a query to all shards, merge their top-N centrally. |
 | **Faceting / aggregation** | Counting and grouping over the matching set, inside the engine. |
 | **Prefilter (vectors)** | Restricting candidates *before* nearest-neighbour search, not after. |
-| **qrels** | Human judgements of which documents are relevant to which query. What makes relevance measurable. |
-| **recall@10** | Fraction of the relevant documents that appear in the top 10, order ignored. |
-| **nDCG@10** | Ranking quality in the top 10, discounted by position — rewards putting the best results first. The standard IR measure. |
-| **MRR** | Mean reciprocal rank — 1/(position of the first relevant result), averaged over queries. |
-| **RRF** | Reciprocal Rank Fusion. Combines two result lists by rank, not score, so no normalization is needed. |

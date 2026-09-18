@@ -1,42 +1,22 @@
-"""Document model, query suite, and timing harness shared by every engine.
+"""Document model, corpus loading, and the per-engine demo runner.
 
-The central design decision is `Query`. The suite has eleven entries and six
-engines, and 66 hand-tuned query strings would make the comparison meaningless
--- you would be comparing how carefully each string was written. So a query is
-described *structurally* (kind + operands) and every engine translates the same
-structure into its own dialect. Where an engine cannot express a kind it raises
-Unsupported, which is itself a finding.
-
-The eleven kinds and what each probes:
-
-    term       baseline latency and baseline scoring
-    phrase     whether positions are indexed
-    boolean    query DSL expressiveness (AND / OR / NOT)
-    prefix     autocomplete strategy (n-grams vs prefix query vs suggester)
-    fuzzy      edit distance; Postgres needs a separate trigram index
-    filtered   filter/query separation and filter caching
-    facet      multi-valued keyword aggregation
-    sort       relevance scoring vs doc-value sorting
-    page       deep paging (from/size vs search_after vs LIMIT/OFFSET)
-    highlight  stored fields and term vectors
-    boosted    per-field weighting
+There is no query abstraction here on purpose. Each engine module writes its own
+queries out as one function per query, in that engine's own syntax. To see what
+Redis is actually asked, open engines/redis.py and read q5_fuzzy -- the command
+in it is the one you would type into redis-cli.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import statistics
-import time
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Protocol
+from typing import Iterable, Iterator
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, "data")
 ARXIV_DOCS = os.path.join(DATA_DIR, "arxiv", "docs.jsonl")
-BEIR_DIR = os.path.join(DATA_DIR, "beir")
 
-# Ports offset from the geo POC's so both can run at once.
 PG_DSN = os.environ.get("PG_DSN", "postgresql://postgres:postgres@localhost:55433/search")
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6381"))
@@ -47,15 +27,8 @@ SOLR_URL = os.environ.get("SOLR_URL", "http://localhost:8984/solr")
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 EMBED_DIMS = 384
 
-
-class Unsupported(Exception):
-    """Engine cannot express a query kind. A result, not a bug."""
-
-
 @dataclass(frozen=True)
 class Doc:
-    """arXiv papers and BEIR corpus entries both normalize to this."""
-
     id: str
     title: str
     abstract: str
@@ -93,7 +66,6 @@ class Doc:
 
 @dataclass(frozen=True)
 class Hit:
-    # Scores are comparable within an engine, never across engines.
     id: str
     score: float
     title: str = ""
@@ -112,61 +84,8 @@ class IndexStats:
         return self.size_bytes / 1024 / 1024
 
 
-@dataclass(frozen=True)
-class Query:
-    """kind: term phrase boolean prefix fuzzy filtered facet sort page highlight boosted."""
 
-    kind: str
-    text: str = ""
-    must: tuple[str, ...] = ()
-    should: tuple[str, ...] = ()
-    must_not: tuple[str, ...] = ()
-    date_from: str | None = None
-    facet_field: str = "categories"
-    sort_field: str | None = None  # None = by relevance
-    offset: int = 0
-    limit: int = 10
-    boosts: tuple[tuple[str, float], ...] = ()
-    label: str = ""
-
-    def name(self) -> str:
-        return self.label or f"{self.kind}:{self.text}"
-
-
-QUERY_SUITE: tuple[Query, ...] = (
-    Query(kind="term", text="retrieval", label="1 term"),
-    Query(kind="phrase", text="attention mechanism", label="2 phrase"),
-    Query(
-        kind="boolean",
-        must=("retrieval",),
-        should=("dense", "sparse"),
-        must_not=("image",),
-        label="3 boolean",
-    ),
-    Query(kind="prefix", text="quant", label="4 prefix"),
-    Query(kind="fuzzy", text="transfomer", label="5 fuzzy"),
-    Query(kind="filtered", text="graph neural", date_from="2023-01-01", label="6 filter+text"),
-    Query(kind="facet", text="retrieval", facet_field="categories", label="7 facet"),
-    Query(kind="sort", text="retrieval", sort_field="update_date", label="8 sort by date"),
-    Query(kind="page", text="learning", offset=4990, limit=10, label="9 deep page"),
-    Query(kind="highlight", text="knowledge distillation", label="10 highlight"),
-    Query(
-        kind="boosted",
-        text="language model",
-        boosts=(("title", 5.0), ("abstract", 1.0)),
-        label="11 boosted",
-    ),
-)
-
-
-class SearchEngine(Protocol):
-    name: str
-
-    def index(self, docs: Iterable[Doc]) -> IndexStats: ...
-    def search(self, q: Query) -> list[Hit]: ...
-    def count(self, q: Query) -> int: ...
-    def facet(self, q: Query, top: int = 10) -> list[tuple[str, int]]: ...
-    def close(self) -> None: ...
+# --- dataset loading ---
 
 
 def read_jsonl(path: str) -> Iterator[dict]:
@@ -180,7 +99,7 @@ def read_jsonl(path: str) -> Iterator[dict]:
 def load_docs(path: str = ARXIV_DOCS, limit: int | None = None) -> list[Doc]:
     if not os.path.exists(path):
         raise SystemExit(
-            f"missing {path}\nRun:  uv run python -m corpora.arxiv   (or -m corpora.beir)"
+            f"missing {path}\nRun:  uv run python -m corpora.arxiv"
         )
     docs = []
     for i, raw in enumerate(read_jsonl(path)):
@@ -200,56 +119,37 @@ def write_jsonl(path: str, rows: Iterable[dict]) -> int:
     return n
 
 
-@dataclass
-class Timing:
-    p50_ms: float
-    p95_ms: float
-    runs: int
-    hits: int
-    error: str = ""
 
-    @classmethod
-    def failed(cls, msg: str) -> "Timing":
-        return cls(0.0, 0.0, 0, 0, msg)
+def run_engine_demo(engine, docs_limit: int = 5000, example: str | None = None) -> None:
+    """Index a small corpus, show what the engine stored, then run every query.
 
+    This is what `python -m engines.postgres` (or .redis, .lucene, ...) does.
+    Each engine file is self-contained: no harness, no comparison, no scoring.
+    """
+    import inspect
 
-def timed(fn, *args, repeat: int = 20, warmup: int = 3) -> tuple[Timing, object]:
-    """Warm runs only: a cold-cache number on a laptop measures the page cache."""
-    try:
-        for _ in range(warmup):
-            fn(*args)
-    except Unsupported as exc:
-        return Timing.failed(f"unsupported: {exc}"), None
-    except Exception as exc:  # noqa: BLE001 - engines fail in engine-specific ways
-        return Timing.failed(f"{type(exc).__name__}: {exc}"), None
+    print(f"== {engine.name}: indexing {docs_limit:,} docs")
+    docs = load_docs(limit=docs_limit)
+    print("  ", engine.index(docs))
 
-    samples = []
-    result = None
-    for _ in range(repeat):
-        t0 = time.perf_counter()
-        result = fn(*args)
-        samples.append((time.perf_counter() - t0) * 1000)
-    samples.sort()
-    n_hits = len(result) if hasattr(result, "__len__") else int(result or 0)
-    return (
-        Timing(
-            p50_ms=statistics.median(samples),
-            p95_ms=samples[min(len(samples) - 1, int(len(samples) * 0.95))],
-            runs=repeat,
-            hits=n_hits,
-        ),
-        result,
-    )
+    example = example or docs[0].id
+    print(f"\n{'=' * 72}\nWHAT {engine.name.upper()} STORED for {example}\n{'=' * 72}")
+    print(engine.stored(example))
 
+    print(f"\n{'=' * 72}\nQUERY PATTERNS\n{'=' * 72}")
+    for name, fn in engine.all_queries():
+        print(f"\n---- {name} " + "-" * (66 - len(name)))
+        print(inspect.getsource(fn).strip())
+        hits = fn()
+        print(f"   {len(hits)} rows:" if hits else "   (no rows)")
+        for hit in hits[:5]:
+            print(f"     {hit.id:<14} {hit.title[:56]}")
 
-def table(headers: list[str], rows: list[list[str]]) -> str:
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(str(cell)))
-    line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
-    sep = "  ".join("-" * w for w in widths)
-    body = [
-        "  ".join(str(c).ljust(widths[i]) for i, c in enumerate(row)) for row in rows
-    ]
-    return "\n".join([line, sep, *body])
+    print(f"\n---- 7-facet " + "-" * 60)
+    print(inspect.getsource(engine.q7_facet).strip())
+    for label, count in engine.q7_facet(top=5):
+        print(f"     {label:<14} {count}")
+
+    print(f"\n---- match count (no rows fetched) " + "-" * 38)
+    print(f"     {engine.q1_term_count():,} documents match")
+    engine.close()
