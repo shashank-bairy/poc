@@ -1,7 +1,7 @@
 [project]
 name = "search-poc"
 version = "0.1.0"
-description = "Search POC: Postgres FTS, Redis, raw Lucene, Elasticsearch, OpenSearch, Solr, plus embeddings and hybrid RRF"
+description = "Search POC: Postgres FTS, Redis, raw Lucene, Elasticsearch, OpenSearch and Solr -- the same corpus and the same eleven queries through all six"
 readme = "README.md"
 authors = [
     { name = "Shashank Bairy R", email = "shashank.bairy04@gmail.com" }
@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Phase 2 only. ~2 GB of torch, so it is not in the default install.
+# vector_search() only. ~2 GB of torch, so it is not in the default install.
 embed = [
     "sentence-transformers>=3.0",
 ]

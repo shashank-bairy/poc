@@ -1,0 +1,168 @@
+== solr: indexing 5,000 docs
+   IndexStats(docs=5000, build_s=0.5358388340100646, size_bytes=4875854, notes='after optimize')
+
+========================================================================
+WHAT SOLR STORED for 0704.0002
+========================================================================
+stored document:
+  id             0704.0002
+  title          Sparsity-certifying Graph Decompositions
+  abstract       We describe a new algorithm, the $(k,\ell)$-pebble game with colors, and use it obtain a cha
+  authors        ['Ileana Streinu', 'Louis Theran']
+  categories     ['math.CO', 'cs.CG']
+  update_date    2008-12-13T00:00:00Z
+  version_count  2
+  _version_      1876648473662586880
+  _root_         0704.0002
+
+index-time analyzer chain for `abstract`:
+  StandardTokenizer          ['Sparsity', 'certifying', 'Graph', 'Decompositions']
+  StopFilter                 ['Sparsity', 'certifying', 'Graph', 'Decompositions']
+  LowerCaseFilter            ['sparsity', 'certifying', 'graph', 'decompositions']
+  EnglishPossessiveFilter    ['sparsity', 'certifying', 'graph', 'decompositions']
+  SetKeywordMarkerFilter     ['sparsity', 'certifying', 'graph', 'decompositions']
+  PorterStemFilter           ['sparsiti', 'certifi', 'graph', 'decomposit']
+
+========================================================================
+QUERY PATTERNS
+========================================================================
+
+---- 1-term ------------------------------------------------------------
+def q1_term(self):
+        return self.search(q="abstract:(retrieval)", rows=10, fl="id,title,score")
+   10 rows:
+     0710.0228      On the fractal nature of mutual relevance sequences in t
+     0804.2057      Comparing and Combining Methods for Automatic Query Expa
+     0802.1738      Characterising through Erasing: A Theoretical Framework 
+     0705.0751      Approximate textual retrieval
+     0710.5054      WWW Spiders: an introduction
+
+---- 2-phrase ----------------------------------------------------------
+def q2_phrase(self):
+        return self.search(q='abstract:"attention mechanism"', rows=10, fl="id,title,score")
+   (no rows)
+
+---- 3-boolean ---------------------------------------------------------
+def q3_boolean(self):
+        return self.search(
+            q="abstract:retrieval AND (abstract:dense OR abstract:sparse) AND -abstract:image",
+            rows=10,
+            fl="id,title,score",
+        )
+   1 rows:
+     0712.2638      Towards Persistence-Based Reconstruction in Euclidean Sp
+
+---- 4-prefix ----------------------------------------------------------
+def q4_prefix(self):
+        return self.search(q="abstract:quant*", rows=10, fl="id,title,score")
+   10 rows:
+     0704.0046      A limit relation for entropy and channel capacity per un
+     0704.0217      Capacity of a Multiple-Antenna Fading Channel with a Qua
+     0704.0229      Geometric Complexity Theory VI: the flip via saturated a
+     0704.0879      A Hierarchical Approach for Dependability Analysis of a 
+     0704.1020      The on-line shortest path problem under partial monitori
+
+---- 5-fuzzy -----------------------------------------------------------
+def q5_fuzzy(self):
+        # Note the term: 'transfom', already stemmed, not 'transfomer'.
+        # Lucene's parser runs only the multiterm chain (lowercasing) on fuzzy,
+        # prefix and wildcard terms, so the raw misspelling sits 3 edits from
+        # the indexed stem 'transform' and matches nothing. ES's `match` +
+        # fuzziness hides this by analyzing the query first.
+        return self.search(q="abstract:transfom~", rows=10, fl="id,title,score")
+   10 rows:
+     0807.4494      Fast, exact (but unstable) spin spherical harmonic trans
+     0805.2111      Quadrature formulas for integrals transforms generated b
+     0710.4689      Functional Equivalence Checking for Verification of Alge
+     0806.4707      Optimal prediction for radiative transfer: A new perspec
+     0704.2842      Quadrature formulas for the Laplace and Mellin transform
+
+---- 6-filter-text -----------------------------------------------------
+def q6_filter_text(self):
+        # fq is the filter: no score contribution, cached in the filterCache.
+        return self.search(
+            q="abstract:(graph neural)",
+            fq="update_date:[2023-01-01T00:00:00Z TO *]",
+            rows=10,
+            fl="id,title,score",
+        )
+   10 rows:
+     0802.3284      Tur\'an Graphs, Stability Number, and Fibonacci Index
+     0704.1782      Asymptotics of the Euler number of bipartite graphs
+     0808.0163      Twice-Ramanujan Sparsifiers
+     0710.3901      A recursive linear time modular decomposition algorithm 
+     0808.2172      The Continuous Graph FFT
+
+---- 8-sort-date -------------------------------------------------------
+def q8_sort_date(self):
+        return self.search(
+            q="abstract:(retrieval)", sort="update_date desc", rows=10, fl="id,title,score"
+        )
+   10 rows:
+     0708.4149      On the complexity of nonnegative matrix factorization
+     0808.2246      Comparing human and automatic thesaurus mapping approach
+     0711.4388      Contextual Information Retrieval based on Algorithmic In
+     0806.2216      An Intelligent Multi-Agent Recommender System for Human 
+     0807.4580      A Logical Model and Data Placement Strategies for MEMS S
+
+---- 9-deep-page -------------------------------------------------------
+def q9_deep_page(self):
+        # start/rows is from/size. cursorMark is the real answer for deep
+        # paging and needs a sort that includes a unique field.
+        return self.search(q="abstract:(learning)", start=4990, rows=10, fl="id,title,score")
+   (no rows)
+
+---- 10-highlight ------------------------------------------------------
+def q10_highlight(self):
+        return self.search(
+            q="abstract:(knowledge distillation)",
+            rows=10,
+            fl="id,title,score",
+            hl="true",
+            **{"hl.fl": "abstract", "hl.snippets": 1, "hl.fragsize": 150},
+        )
+   10 rows:
+     0708.3699      Convolutional Entanglement Distillation
+     0804.4523      A non-distillability criterion for secret correlations
+     0706.2544      Abstract machines for dialogue games
+     0709.1449      Supervised secure entanglement sharing for faithful quan
+     0802.3789      Knowledge Technologies
+
+---- 11-boosted --------------------------------------------------------
+def q11_boosted(self):
+        # edismax takes the raw user words and spreads them across weighted
+        # fields, tolerating punctuation a real user would type. The standard
+        # parser would throw a parse error on it -- which is why every other
+        # query here is written against pre-cleaned text.
+        return self.search(
+            q="language model",
+            defType="edismax",
+            qf="title^5 abstract^1",
+            rows=10,
+            fl="id,title,score",
+        )
+   10 rows:
+     0711.1360      Analytical approach to bit-string models of language evo
+     0801.0135      Concepts and their Use for Modelling Objects and Referen
+     0801.1658      Computational approach to the emergence and evolution of
+     0801.4716      Methods to integrate a language model with semantic info
+     0804.3599      Respect My Authority! HITS Without Hyperlinks, Utilizing
+
+---- 7-facet ------------------------------------------------------------
+def q7_facet(self, top: int = 10) -> list[tuple[str, int]]:
+        res = self._run(
+            q="abstract:(retrieval)",
+            rows=0,
+            facet="true",
+            **{"facet.field": "categories", "facet.limit": 10, "facet.mincount": 1},
+        )
+        flat = res.facets["facet_fields"]["categories"]  # [value, count, value, count, ...]
+        return [(flat[i], int(flat[i + 1])) for i in range(0, len(flat), 2)][:top]
+     cs.IR          19
+     cs.DB          6
+     cs.DS          5
+     cs.CL          4
+     cs.HC          4
+
+---- match count (no rows fetched) --------------------------------------
+     46 documents match

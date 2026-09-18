@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Services, jars, data, then both comparison passes.
+# Services, jars, then every engine in turn: what it stored, and every query.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -17,31 +17,15 @@ uv sync --quiet
 echo "==> lucene jars"
 ./lucene_raw/fetch_jars.sh
 
-if [ ! -f data/beir/scifact/docs.jsonl ]; then
-  echo "==> relevance set (BEIR SciFact)"
-  uv run python -m corpora.beir
-fi
-
 if [ ! -f data/arxiv/docs.jsonl ]; then
   echo
-  echo "No arXiv corpus. It needs a Kaggle token at ~/.kaggle/kaggle.json:"
+  echo "No corpus yet. It needs a Kaggle token at ~/.kaggle/kaggle.json:"
   echo "    uv run python -m corpora.arxiv --limit 200000"
-  echo "Falling back to SciFact for the performance pass -- 5k docs, so those"
-  echo "latencies are indicative only, and it carries no categories or dates."
-  CORPUS=data/beir/scifact/docs.jsonl
-else
-  CORPUS=data/arxiv/docs.jsonl
+  exit 1
 fi
 
-echo
-echo "==> performance: same corpus, same query suite, every engine"
-uv run python -m bench.compare --docs "$CORPUS"
-
-echo
-echo "==> relevance: BEIR judgements, nDCG@10 / recall@10 / MRR"
-uv run python -m bench.evaluate
-
-echo
-echo "Phase 2 (embeddings + hybrid RRF), ~2 GB of torch:"
-echo "    uv sync --extra embed"
-echo "    uv run python -m bench.evaluate --engines elasticsearch,dense,hybrid"
+for engine in postgres redis lucene elasticsearch opensearch solr; do
+  echo
+  echo "############################################################ $engine"
+  uv run python -m "engines.$engine"
+done

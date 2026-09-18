@@ -1,0 +1,200 @@
+== elasticsearch: indexing 5,000 docs
+   IndexStats(docs=5000, build_s=0.6037059589871205, size_bytes=5525309, notes='1 segment(s) after forcemerge')
+
+========================================================================
+WHAT ELASTICSEARCH STORED for 0704.0002
+========================================================================
+_source (verbatim JSON, not searchable):
+  id           0704.0002
+  title        Sparsity-certifying Graph Decompositions
+  abstract     We describe a new algorithm, the $(k,\ell)$-pebble game with colors, and use it obtain a charact
+  authors      ['Ileana Streinu', 'Louis Theran']
+  categories   ['math.CO', 'cs.CG']
+  update_date  2008-12-13
+  version_count 2
+  doi          
+
+analyzed terms (what the inverted index holds):
+  title       (text)    ['sparsiti', 'certifi', 'graph', 'decomposit']
+  abstract    (text)    ['we', 'describ', 'new', 'algorithm', 'k', 'ell', 'pebbl', 'game', 'color', 'us', 'obtain', 'character', 'famili', 'k'] ...
+  categories  (keyword) ['math.CO']   <- not split, not stemmed, not lowercased
+
+========================================================================
+QUERY PATTERNS
+========================================================================
+
+---- 1-term ------------------------------------------------------------
+def q1_term(self):
+        return self.search({
+            "size": 10,
+            "query": {"match": {"abstract": "retrieval"}},
+        })
+   10 rows:
+     0710.0228      On the fractal nature of mutual relevance sequences in t
+     0804.2057      Comparing and Combining Methods for Automatic Query Expa
+     0802.1738      Characterising through Erasing: A Theoretical Framework 
+     0705.0751      Approximate textual retrieval
+     0710.5054      WWW Spiders: an introduction
+
+---- 2-phrase ----------------------------------------------------------
+def q2_phrase(self):
+        return self.search({
+            "size": 10,
+            "query": {"match_phrase": {"abstract": "attention mechanism"}},
+        })
+   (no rows)
+
+---- 3-boolean ---------------------------------------------------------
+def q3_boolean(self):
+        # `should` beside `must` boosts rather than filters unless
+        # minimum_should_match says otherwise.
+        return self.search({
+            "size": 10,
+            "query": {
+                "bool": {
+                    "must": [{"match": {"abstract": "retrieval"}}],
+                    "should": [
+                        {"match": {"abstract": "dense"}},
+                        {"match": {"abstract": "sparse"}},
+                    ],
+                    "minimum_should_match": 1,
+                    "must_not": [{"match": {"abstract": "image"}}],
+                }
+            },
+        })
+   1 rows:
+     0712.2638      Towards Persistence-Based Reconstruction in Euclidean Sp
+
+---- 4-prefix ----------------------------------------------------------
+def q4_prefix(self):
+        # Prefixes only the last term, against the real index. An edge_ngram
+        # analyzer would be faster at query time and far larger on disk.
+        return self.search({
+            "size": 10,
+            "query": {"match_phrase_prefix": {"abstract": "quant"}},
+        })
+   10 rows:
+     0808.2548      Negative Beta Encoder
+     0806.1156      Utilisation des grammaires probabilistes dans les t\^ach
+     0801.4024      Set-based complexity and biological information
+     0804.0441      Joint Beamforming for Multiaccess MIMO Systems with Fini
+     0803.1945      Resampling and requantization of band-limited Gaussian s
+
+---- 5-fuzzy -----------------------------------------------------------
+def q5_fuzzy(self):
+        # fuzziness AUTO scales edit distance with term length (0 for <=2
+        # chars, 1 for <=5, 2 beyond). `match` analyzes first, which is why
+        # this finds the stem where a raw Lucene FuzzyQuery on the same string
+        # does not.
+        return self.search({
+            "size": 10,
+            "query": {"match": {"abstract": {"query": "transfomer", "fuzziness": "AUTO"}}},
+        })
+   10 rows:
+     0807.4494      Fast, exact (but unstable) spin spherical harmonic trans
+     0805.2111      Quadrature formulas for integrals transforms generated b
+     0710.4689      Functional Equivalence Checking for Verification of Alge
+     0806.4707      Optimal prediction for radiative transfer: A new perspec
+     0704.2842      Quadrature formulas for the Laplace and Mellin transform
+
+---- 6-filter-text -----------------------------------------------------
+def q6_filter_text(self):
+        # filter, not must: contributes no score and is cacheable in the node
+        # query cache. This separation is what Postgres has no equivalent of.
+        return self.search({
+            "size": 10,
+            "query": {
+                "bool": {
+                    "must": [{"match": {"abstract": "graph neural"}}],
+                    "filter": [{"range": {"update_date": {"gte": "2023-01-01"}}}],
+                }
+            },
+        })
+   10 rows:
+     0802.3284      Tur\'an Graphs, Stability Number, and Fibonacci Index
+     0704.1782      Asymptotics of the Euler number of bipartite graphs
+     0808.0163      Twice-Ramanujan Sparsifiers
+     0710.3901      A recursive linear time modular decomposition algorithm 
+     0808.2172      The Continuous Graph FFT
+
+---- 8-sort-date -------------------------------------------------------
+def q8_sort_date(self):
+        # Sorting reads doc values and skips scoring entirely, so _score is null.
+        return self.search({
+            "size": 10,
+            "query": {"match": {"abstract": "retrieval"}},
+            "sort": [{"update_date": "desc"}],
+        })
+   10 rows:
+     0708.4149      On the complexity of nonnegative matrix factorization
+     0808.2246      Comparing human and automatic thesaurus mapping approach
+     0711.4388      Contextual Information Retrieval based on Algorithmic In
+     0806.2216      An Intelligent Multi-Agent Recommender System for Human 
+     0807.4580      A Logical Model and Data Placement Strategies for MEMS S
+
+---- 9-deep-page -------------------------------------------------------
+def q9_deep_page(self):
+        # from/size collects 5,000 hits to return 10. search_after is the fix
+        # and needs the previous page's sort values.
+        return self.search({
+            "size": 10,
+            "from": 4990,
+            "query": {"match": {"abstract": "learning"}},
+        })
+   (no rows)
+
+---- 10-highlight ------------------------------------------------------
+def q10_highlight(self):
+        return self.search({
+            "size": 10,
+            "query": {"match": {"abstract": "knowledge distillation"}},
+            "highlight": {
+                "fields": {"abstract": {"fragment_size": 150, "number_of_fragments": 1}}
+            },
+        })
+   10 rows:
+     0708.3699      Convolutional Entanglement Distillation
+     0804.4523      A non-distillability criterion for secret correlations
+     0706.2544      Abstract machines for dialogue games
+     0709.1449      Supervised secure entanglement sharing for faithful quan
+     0802.3789      Knowledge Technologies
+
+---- 11-boosted --------------------------------------------------------
+def q11_boosted(self):
+        # best_fields takes the single best field score; most_fields sums them,
+        # and that choice moves the ranking more than the boost values do.
+        return self.search({
+            "size": 10,
+            "query": {
+                "multi_match": {
+                    "query": "language model",
+                    "fields": ["title^5", "abstract^1"],
+                    "type": "best_fields",
+                }
+            },
+        })
+   10 rows:
+     0711.1360      Analytical approach to bit-string models of language evo
+     0801.0135      Concepts and their Use for Modelling Objects and Referen
+     0801.1658      Computational approach to the emergence and evolution of
+     0801.4716      Methods to integrate a language model with semantic info
+     0804.3599      Respect My Authority! HITS Without Hyperlinks, Utilizing
+
+---- 7-facet ------------------------------------------------------------
+def q7_facet(self, top: int = 10) -> list[tuple[str, int]]:
+        # categories is a keyword array, so one document lands in several
+        # buckets and the counts sum past the hit count.
+        res = self._search({
+            "size": 0,
+            "query": {"match": {"abstract": "retrieval"}},
+            "aggs": {"facets": {"terms": {"field": "categories", "size": 10}}},
+        })
+        return [(b["key"], b["doc_count"]) for b in res["aggregations"]["facets"]["buckets"]][:top]
+     cs.IR          19
+     cs.DB          6
+     cs.DS          5
+     cs.CL          4
+     cs.HC          4
+
+---- match count (no rows fetched) --------------------------------------
+     46 documents match

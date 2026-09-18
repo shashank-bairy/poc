@@ -1,57 +1,201 @@
-"""Solr: the same Lucene, schema-first.
+"""Solr. One function per query, the parameters inside the function.
 
-Vocabulary vs Elasticsearch: core/collection not index, managed-schema not
-mapping, string not keyword, fq not filter clause, edismax+qf not multi_match,
-cursorMark not search_after, ZooKeeper instead of built-in coordination.
+Every query here runs as-is in curl:
+
+    curl -s 'localhost:8984/solr/papers/select?q=abstract:(retrieval)&rows=10' | jq
+
+Vocabulary against Elasticsearch:
+    core / collection   not index
+    managed-schema      not mapping
+    string              not keyword
+    fq                  not a filter clause
+    edismax + qf        not multi_match
+    cursorMark          not search_after
+    ZooKeeper           not built-in coordination
+
+    uv run python -m engines.solr
 """
 
 from __future__ import annotations
 
-import re
 import time
 from typing import Iterable
 
 import pysolr
 import requests
 
-from core.common import SOLR_URL, Doc, Hit, IndexStats, Query
-
-CORE = "papers"
-
-# text_en ships with the default configset: tokenize, lowercase, stopwords,
-# porter stemmer -- the job `analyzer: english` does in Elasticsearch.
-FIELDS = [
-    {"name": "title", "type": "text_en", "stored": True, "indexed": True},
-    {"name": "abstract", "type": "text_en", "stored": True, "indexed": True},
-    {"name": "authors", "type": "string", "stored": True, "indexed": True, "multiValued": True},
-    {"name": "categories", "type": "string", "stored": True, "indexed": True, "multiValued": True},
-    {"name": "update_date", "type": "pdate", "stored": True, "indexed": True, "docValues": True},
-    {"name": "version_count", "type": "pint", "stored": True, "indexed": True, "docValues": True},
-    {"name": "doi", "type": "string", "stored": True, "indexed": False},
-]
+from core.common import SOLR_URL, Doc, Hit, IndexStats
 
 
 class SolrEngine:
     name = "solr"
 
-    def __init__(self, base: str = SOLR_URL, core: str = CORE):
+    # ---------------------------------------------------------------- queries
+
+    def q1_term(self):
+        return self.search(q="abstract:(retrieval)", rows=10, fl="id,title,score")
+
+    def q1_term_count(self) -> int:
+        return self.count(q="abstract:(retrieval)", rows=0)
+
+    def q2_phrase(self):
+        return self.search(q='abstract:"attention mechanism"', rows=10, fl="id,title,score")
+
+    def q3_boolean(self):
+        return self.search(
+            q="abstract:retrieval AND (abstract:dense OR abstract:sparse) AND -abstract:image",
+            rows=10,
+            fl="id,title,score",
+        )
+
+    def q4_prefix(self):
+        return self.search(q="abstract:quant*", rows=10, fl="id,title,score")
+
+    def q5_fuzzy(self):
+        # Note the term: 'transfom', already stemmed, not 'transfomer'.
+        # Lucene's parser runs only the multiterm chain (lowercasing) on fuzzy,
+        # prefix and wildcard terms, so the raw misspelling sits 3 edits from
+        # the indexed stem 'transform' and matches nothing. ES's `match` +
+        # fuzziness hides this by analyzing the query first.
+        return self.search(q="abstract:transfom~", rows=10, fl="id,title,score")
+
+    def q6_filter_text(self):
+        # fq is the filter: no score contribution, cached in the filterCache.
+        return self.search(
+            q="abstract:(graph neural)",
+            fq="update_date:[2023-01-01T00:00:00Z TO *]",
+            rows=10,
+            fl="id,title,score",
+        )
+
+    def q7_facet(self, top: int = 10) -> list[tuple[str, int]]:
+        res = self._run(
+            q="abstract:(retrieval)",
+            rows=0,
+            facet="true",
+            **{"facet.field": "categories", "facet.limit": 10, "facet.mincount": 1},
+        )
+        flat = res.facets["facet_fields"]["categories"]  # [value, count, value, count, ...]
+        return [(flat[i], int(flat[i + 1])) for i in range(0, len(flat), 2)][:top]
+
+    def q8_sort_date(self):
+        return self.search(
+            q="abstract:(retrieval)", sort="update_date desc", rows=10, fl="id,title,score"
+        )
+
+    def q9_deep_page(self):
+        # start/rows is from/size. cursorMark is the real answer for deep
+        # paging and needs a sort that includes a unique field.
+        return self.search(q="abstract:(learning)", start=4990, rows=10, fl="id,title,score")
+
+    def q10_highlight(self):
+        return self.search(
+            q="abstract:(knowledge distillation)",
+            rows=10,
+            fl="id,title,score",
+            hl="true",
+            **{"hl.fl": "abstract", "hl.snippets": 1, "hl.fragsize": 150},
+        )
+
+    def q11_boosted(self):
+        # edismax takes the raw user words and spreads them across weighted
+        # fields, tolerating punctuation a real user would type. The standard
+        # parser would throw a parse error on it -- which is why every other
+        # query here is written against pre-cleaned text.
+        return self.search(
+            q="language model",
+            defType="edismax",
+            qf="title^5 abstract^1",
+            rows=10,
+            fl="id,title,score",
+        )
+
+    def all_queries(self):
+        return [
+            ("1-term", self.q1_term),
+            ("2-phrase", self.q2_phrase),
+            ("3-boolean", self.q3_boolean),
+            ("4-prefix", self.q4_prefix),
+            ("5-fuzzy", self.q5_fuzzy),
+            ("6-filter-text", self.q6_filter_text),
+            ("8-sort-date", self.q8_sort_date),
+            ("9-deep-page", self.q9_deep_page),
+            ("10-highlight", self.q10_highlight),
+            ("11-boosted", self.q11_boosted),
+        ]
+
+    # ------------------------------------------------------ what is on disk
+
+    def stored(self, doc_id: str) -> str:
+        """The stored document, then the analyzer chain stage by stage.
+
+        Solr's analysis endpoint is the most explicit of any engine here: it
+        names every tokenizer and filter in the chain and shows the tokens
+        after each one. That is the whole index-time pipeline, printed.
+        """
+        docs = self._run(q=f'id:"{doc_id}"', rows=1, fl="*").docs
+        if not docs:
+            return f"no such doc: {doc_id}"
+        doc = docs[0]
+        out = ["stored document:"]
+        for k, v in doc.items():
+            if k == "vec":
+                v = f"<{len(v)} floats>"
+            out.append(f"  {k:<14} {str(v)[:92]}")
+        out.append("\nindex-time analyzer chain for `abstract`:")
+        for stage, tokens in self._analysis_chain(doc.get("title", "")):
+            out.append(f"  {stage:<26} {tokens}")
+        return "\n".join(out)
+
+    # ------------------------------------------------------------- the runner
+
+    def search(self, q: str, **params) -> list[Hit]:
+        res = self._run(q=q, **params)
+        hl = getattr(res, "highlighting", {}) or {}
+        return [
+            Hit(
+                id=doc["id"],
+                score=float(doc.get("score", 0.0)),
+                title=doc.get("title", ""),
+                highlight=(hl.get(doc["id"], {}).get("abstract") or [""])[0],
+            )
+            for doc in res.docs
+        ]
+
+    def count(self, q: str, **params) -> int:
+        return int(self._run(q=q, **params).hits)
+
+    def _analysis_chain(self, text: str) -> list[tuple[str, list[str]]]:
+        """Solr's analysis endpoint: every stage of the chain, named."""
+        res = requests.get(
+            f"{self.url}/analysis/field",
+            params={"analysis.fieldname": "abstract", "analysis.fieldvalue": text, "wt": "json"},
+            timeout=30,
+        ).json()
+        stages = res["analysis"]["field_names"]["abstract"]["index"]
+        out = []
+        for i in range(0, len(stages), 2):
+            name = stages[i].rsplit(".", 1)[-1]
+            out.append((name, [t["text"] for t in stages[i + 1]]))
+        return out
+
+    def _run(self, q: str, **params):
+        return self.solr.search(q, **params)
+
+    def __init__(self, base: str = SOLR_URL, core: str = "papers"):
         self.base = base.rstrip("/")
         self.core = core
         self.url = f"{self.base}/{core}"
         self.solr = pysolr.Solr(self.url, timeout=120, always_commit=False)
-        self._stem_cache: dict[str, str] = {}
 
-    def _ensure_schema(self) -> None:
+    def index(self, docs: Iterable[Doc], with_vectors: bool = False) -> IndexStats:
+        docs = list(docs)
         existing = {
             f["name"] for f in requests.get(f"{self.url}/schema/fields", timeout=30).json()["fields"]
         }
         new = [f for f in FIELDS if f["name"] not in existing]
         if new:
             requests.post(f"{self.url}/schema", json={"add-field": new}, timeout=60).raise_for_status()
-
-    def index(self, docs: Iterable[Doc], with_vectors: bool = False) -> IndexStats:
-        docs = list(docs)
-        self._ensure_schema()
         self.solr.delete(q="*:*", commit=True)
 
         t0 = time.perf_counter()
@@ -81,109 +225,31 @@ class SolrEngine:
         info = requests.get(
             f"{self.base}/admin/cores", params={"action": "STATUS", "core": self.core}, timeout=30
         ).json()
-        size = int(info["status"][self.core]["index"].get("sizeInBytes", 0))
-        return IndexStats(docs=len(docs), build_s=build_s, size_bytes=size, notes="after optimize")
-
-    @staticmethod
-    def _clean(text: str) -> str:
-        """'(', ')', ':' and '-' are operators in the standard parser, so raw
-        user text is a parse error. edismax tolerates it, which is why the
-        boosted query needs no cleaning."""
-        return " ".join(t for t in re.split(r"\W+", text) if len(t) > 1)
-
-    def _stem(self, text: str) -> str:
-        """One term through the field's analyzer, via Solr's analysis API. Cached
-        so the extra round trip never lands inside a latency measurement."""
-        if text in self._stem_cache:
-            return self._stem_cache[text]
-        resp = requests.get(
-            f"{self.url}/analysis/field",
-            params={"analysis.fieldname": "abstract", "analysis.fieldvalue": text, "wt": "json"},
-            timeout=30,
+        return IndexStats(
+            docs=len(docs),
+            build_s=build_s,
+            size_bytes=int(info["status"][self.core]["index"].get("sizeInBytes", 0)),
+            notes="after optimize",
         )
-        stem = text.lower()
-        try:
-            # [stage_name, tokens, ...]; the last stage is the analyzed form.
-            tokens = resp.json()["analysis"]["field_names"]["abstract"]["index"][-1]
-            if tokens:
-                stem = tokens[0]["text"]
-        except (KeyError, IndexError, ValueError):
-            pass
-        self._stem_cache[text] = stem
-        return stem
-
-    def _params(self, q: Query) -> tuple[str, dict]:
-        params: dict = {"rows": q.limit, "start": q.offset, "fl": "id,title,score"}
-        text = self._clean(q.text)
-        query = text
-
-        if q.kind == "phrase":
-            query = f'abstract:"{text}"'
-        elif q.kind == "boolean":
-            parts = [f"abstract:{t}" for t in q.must]
-            if q.should:
-                parts.append("(" + " OR ".join(f"abstract:{t}" for t in q.should) + ")")
-            parts += [f"-abstract:{t}" for t in q.must_not]
-            query = " AND ".join(parts)
-        elif q.kind == "prefix":
-            query = f"abstract:{text}*"
-        elif q.kind == "fuzzy":
-            # '~' is edit distance 2. The term must be stemmed first: Lucene's
-            # parser runs only the multiterm chain (lowercasing) on fuzzy,
-            # prefix and wildcard terms, and the index holds stems.
-            query = f"abstract:{self._stem(text)}~"
-        elif q.kind == "filtered":
-            query = f"abstract:({text})"
-            params["fq"] = f"update_date:[{q.date_from}T00:00:00Z TO *]"  # cached, unscored
-        elif q.kind == "boosted":
-            params["defType"] = "edismax"
-            params["qf"] = " ".join(f"{f}^{w}" for f, w in q.boosts)
-            query = q.text
-        else:
-            query = f"abstract:({text})"
-
-        if q.kind == "facet":
-            params.update(
-                {"facet": "true", "facet.field": q.facet_field, "facet.limit": 10, "facet.mincount": 1}
-            )
-        if q.sort_field:
-            params["sort"] = f"{q.sort_field} desc"
-        if q.kind == "highlight":
-            params.update({"hl": "true", "hl.fl": "abstract", "hl.snippets": 1, "hl.fragsize": 150})
-        return query, params
-
-    def search(self, q: Query) -> list[Hit]:
-        query, params = self._params(q)
-        res = self.solr.search(query, **params)
-        hl = getattr(res, "highlighting", {}) or {}
-        out = []
-        for doc in res.docs:
-            frags = hl.get(doc["id"], {}).get("abstract", [])
-            out.append(
-                Hit(
-                    id=doc["id"],
-                    score=float(doc.get("score", 0.0)),
-                    title=doc.get("title", ""),
-                    highlight=frags[0] if frags else "",
-                )
-            )
-        return out
-
-    def count(self, q: Query) -> int:
-        query, params = self._params(q)
-        params.update({"rows": 0, "start": 0})
-        params.pop("sort", None)
-        params.pop("hl", None)
-        return int(self.solr.search(query, **params).hits)
-
-    def facet(self, q: Query, top: int = 10) -> list[tuple[str, int]]:
-        query, params = self._params(q)
-        params.update(
-            {"rows": 0, "facet": "true", "facet.field": q.facet_field, "facet.limit": top, "facet.mincount": 1}
-        )
-        res = self.solr.search(query, **params)
-        flat = res.facets["facet_fields"][q.facet_field]  # [value, count, value, count, ...]
-        return [(flat[i], int(flat[i + 1])) for i in range(0, len(flat), 2)]
 
     def close(self) -> None:
         pass
+
+
+# text_en ships with the default configset: tokenize, lowercase, stopwords,
+# porter stemmer -- the job `analyzer: english` does in Elasticsearch.
+FIELDS = [
+    {"name": "title", "type": "text_en", "stored": True, "indexed": True},
+    {"name": "abstract", "type": "text_en", "stored": True, "indexed": True},
+    {"name": "authors", "type": "string", "stored": True, "indexed": True, "multiValued": True},
+    {"name": "categories", "type": "string", "stored": True, "indexed": True, "multiValued": True},
+    {"name": "update_date", "type": "pdate", "stored": True, "indexed": True, "docValues": True},
+    {"name": "version_count", "type": "pint", "stored": True, "indexed": True, "docValues": True},
+    {"name": "doi", "type": "string", "stored": True, "indexed": False},
+]
+
+
+if __name__ == "__main__":
+    from core.common import run_engine_demo
+
+    run_engine_demo(SolrEngine())

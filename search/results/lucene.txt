@@ -1,0 +1,136 @@
+== lucene: indexing 5,000 docs
+   IndexStats(docs=5000, build_s=0.797108875, size_bytes=4454373, notes='forceMerge(1), BM25Similarity, EnglishAnalyzer')
+
+========================================================================
+WHAT LUCENE STORED for 0704.0002
+========================================================================
+stored fields (verbatim, never searched):
+  id           0704.0002
+  title        Sparsity-certifying Graph Decompositions
+  abstract     We describe a new algorithm, the $(k,\ell)$-pebble game with colors, and use it obtain a charact
+  categories   math.CO|cs.CG
+  update_date  2008-12-13
+  doi          
+
+indexed terms (what the postings are keyed on):
+  title       ['sparsiti', 'certifi', 'graph', 'decomposit']
+  abstract    ['we', 'describ', 'new', 'algorithm', 'k', 'ell', 'pebbl', 'game', 'color', 'us', 'obtain', 'character', 'famili', 'k'] ...
+
+========================================================================
+QUERY PATTERNS
+========================================================================
+
+---- 1-term ------------------------------------------------------------
+def q1_term(self):
+        return self.search("abstract:retrieval")
+   10 rows:
+     0710.0228      On the fractal nature of mutual relevance sequences in t
+     0804.2057      Comparing and Combining Methods for Automatic Query Expa
+     0802.1738      Characterising through Erasing: A Theoretical Framework 
+     0705.0751      Approximate textual retrieval
+     0710.5054      WWW Spiders: an introduction
+
+---- 2-phrase ----------------------------------------------------------
+def q2_phrase(self):
+        return self.search('abstract:"attention mechanism"')
+   (no rows)
+
+---- 3-boolean ---------------------------------------------------------
+def q3_boolean(self):
+        # + is MUST, - is MUST_NOT, bare is SHOULD. AND/OR/NOT keywords work
+        # too and mean the same thing.
+        return self.search("+abstract:retrieval +(abstract:dense abstract:sparse) -abstract:image")
+   1 rows:
+     0712.2638      Towards Persistence-Based Reconstruction in Euclidean Sp
+
+---- 4-prefix ----------------------------------------------------------
+def q4_prefix(self):
+        # Walks the term dictionary from the prefix and rewrites into a
+        # disjunction. Cheap for a rare prefix, a TooManyClauses risk for a
+        # common one. Matched against stems: 'quant' finds the stem 'quantiz'.
+        return self.search("abstract:quant*")
+   10 rows:
+     0704.0046      A limit relation for entropy and channel capacity per un
+     0704.0217      Capacity of a Multiple-Antenna Fading Channel with a Qua
+     0704.0229      Geometric Complexity Theory VI: the flip via saturated a
+     0704.0879      A Hierarchical Approach for Dependability Analysis of a 
+     0704.1020      The on-line shortest path problem under partial monitori
+
+---- 5-fuzzy -----------------------------------------------------------
+def q5_fuzzy(self):
+        # 'transfom~2' -- already stemmed, edit distance 2. Written
+        # 'transfomer~2' it matches nothing: the index holds 'transform', which
+        # is 3 edits away, and Lucene caps maxEdits at 2.
+        return self.search("abstract:transfom~2")
+   10 rows:
+     0807.4494      Fast, exact (but unstable) spin spherical harmonic trans
+     0805.2111      Quadrature formulas for integrals transforms generated b
+     0710.4689      Functional Equivalence Checking for Verification of Alge
+     0806.4707      Optimal prediction for radiative transfer: A new perspec
+     0704.2842      Quadrature formulas for the Laplace and Mellin transform
+
+---- 6-filter-text -----------------------------------------------------
+def q6_filter_text(self):
+        # update_date is a LongPoint (BKD tree) of epoch days; 19358 is
+        # 2023-01-01. In the Java API this would be a FILTER clause
+        # contributing no score; in parser syntax it is a MUST that does.
+        return self.search("abstract:(graph neural) AND update_date:[19358 TO 2147483647]")
+   (no rows)
+
+---- 8-sort-date -------------------------------------------------------
+def q8_sort_date(self):
+        # update_date_dv, not update_date: a LongPoint answers ranges and is
+        # NOT sortable. Sorting needs a separate NumericDocValuesField over the
+        # same number. The classic Lucene surprise.
+        return self.search("abstract:retrieval", sort="update_date_dv")
+   10 rows:
+     0708.4149      On the complexity of nonnegative matrix factorization
+     0808.2246      Comparing human and automatic thesaurus mapping approach
+     0711.4388      Contextual Information Retrieval based on Algorithmic In
+     0806.2216      An Intelligent Multi-Agent Recommender System for Human 
+     0807.4580      A Logical Model and Data Placement Strategies for MEMS S
+
+---- 9-deep-page -------------------------------------------------------
+def q9_deep_page(self):
+        # offset+limit collects 5,000 ScoreDocs to return 10. searchAfter takes
+        # the previous page's last ScoreDoc and is the real fix.
+        return self.search("abstract:learning", offset=4990)
+   (no rows)
+
+---- 10-highlight ------------------------------------------------------
+def q10_highlight(self):
+        # The Highlighter re-analyzes the stored text at query time; term
+        # vectors would avoid that at the cost of a much larger index.
+        return self.search("abstract:(knowledge distillation)", highlight="abstract")
+   10 rows:
+     0708.3699      Convolutional Entanglement Distillation
+     0804.4523      A non-distillability criterion for secret correlations
+     0706.2544      Abstract machines for dialogue games
+     0709.1449      Supervised secure entanglement sharing for faithful quan
+     0802.3789      Knowledge Technologies
+
+---- 11-boosted --------------------------------------------------------
+def q11_boosted(self):
+        # ^5.0 is a BoostQuery multiplying the subquery score. Field norms
+        # already favour short fields like title, so a title boost compounds.
+        return self.search("title:(language model)^5.0 abstract:(language model)^1.0")
+   10 rows:
+     0711.1360      Analytical approach to bit-string models of language evo
+     0801.4716      Methods to integrate a language model with semantic info
+     0801.1658      Computational approach to the emergence and evolution of
+     0801.0135      Concepts and their Use for Modelling Objects and Referen
+     0804.3599      Respect My Authority! HITS Without Hyperlinks, Utilizing
+
+---- 7-facet ------------------------------------------------------------
+def q7_facet(self, top: int = 10) -> list[tuple[str, int]]:
+        # Counts come from the SortedSetDocValues column, not the postings.
+        data = self._post({"q": "abstract:retrieval", "limit": 10, "facet": "categories"})
+        return [(value, int(n)) for value, n in data.get("facets", [])][:top]
+     cs.IR          19
+     cs.DB          6
+     cs.DS          5
+     cs.CL          4
+     cs.HC          4
+
+---- match count (no rows fetched) --------------------------------------
+     46 documents match

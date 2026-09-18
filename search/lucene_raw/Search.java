@@ -2,6 +2,10 @@
  * Raw Lucene: IndexWriter, Document, IndexSearcher, Query, analyzer chain.
  * Everything the three REST engines do for retrieval happens in this file.
  *
+ * Queries are literal QueryParser strings from queries/lucene.yaml; this file
+ * parses them and applies the flags beside them (sort, facet, highlight,
+ * offset, limit, count_only).
+ *
  * What is visible here that the REST engines hide:
  *
  *   IndexWriter        buffers documents in RAM, flushes a *segment* -- an
@@ -36,6 +40,8 @@ import com.google.gson.*;
 import com.sun.net.httpserver.*;
 
 import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.TokenStream;
+import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.lucene.analysis.en.EnglishAnalyzer;
 import org.apache.lucene.document.*;
 import org.apache.lucene.facet.*;
@@ -45,9 +51,7 @@ import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.*;
 import org.apache.lucene.search.highlight.*;
 import org.apache.lucene.search.similarities.BM25Similarity;
-import org.apache.lucene.search.similarities.ClassicSimilarity;
 import org.apache.lucene.store.FSDirectory;
-import org.apache.lucene.util.BytesRef;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -228,94 +232,19 @@ public class Search {
 
     // ------------------------------------------------------- query building
 
-    static List<String> strings(JsonObject o, String k) {
-        List<String> out = new ArrayList<>();
-        for (JsonElement e : arr(o, k)) out.add(e.getAsString());
-        return out;
-    }
-
-    /** Analyze like the index did, so query terms match indexed terms. */
-    static String analyzed(String field, String text) throws Exception {
-        // 'Retrieval' has to become the indexed lexeme 'retriev'.
-        Query q = new QueryParser(field, ANALYZER).parse(QueryParser.escape(text));
-        if (q instanceof TermQuery tq) return tq.getTerm().text();
-        return text.toLowerCase(Locale.ROOT);
-    }
-
     static Query build(JsonObject req) throws Exception {
-        String kind = str(req, "kind");
-        String text = str(req, "text");
         QueryParser parser = new QueryParser("abstract", ANALYZER);
-
-        switch (kind) {
-            case "phrase" -> {
-                // TextField stores positions by default; IndexOptions can turn
-                // them off for a smaller index, and phrases then stop working.
-                PhraseQuery.Builder pb = new PhraseQuery.Builder();
-                int pos = 0;
-                for (String w : text.split("\\s+")) pb.add(new Term("abstract", analyzed("abstract", w)), pos++);
-                return pb.build();
-            }
-            case "boolean" -> {
-                BooleanQuery.Builder bb = new BooleanQuery.Builder();
-                for (String t : strings(req, "must"))
-                    bb.add(new TermQuery(new Term("abstract", analyzed("abstract", t))), BooleanClause.Occur.MUST);
-                List<String> should = strings(req, "should");
-                if (!should.isEmpty()) {
-                    BooleanQuery.Builder ob = new BooleanQuery.Builder();
-                    for (String t : should)
-                        ob.add(new TermQuery(new Term("abstract", analyzed("abstract", t))), BooleanClause.Occur.SHOULD);
-                    bb.add(ob.build(), BooleanClause.Occur.MUST);
-                }
-                for (String t : strings(req, "must_not"))
-                    bb.add(new TermQuery(new Term("abstract", analyzed("abstract", t))), BooleanClause.Occur.MUST_NOT);
-                return bb.build();
-            }
-            case "prefix" -> {
-                // Rewrites into a disjunction of dictionary terms; a common
-                // prefix risks TooManyClauses. Not analyzed: the dictionary
-                // holds stems, so 'quant' is matched against 'quantiz'.
-                return new PrefixQuery(new Term("abstract", text.toLowerCase(Locale.ROOT)));
-            }
-            case "fuzzy" -> {
-                // Levenshtein automaton over the term dictionary, maxEdits
-                // capped at 2. The misspelling must be stemmed first: the index
-                // holds 'transform', 3 edits from raw 'transfomer' but 1 from
-                // stemmed 'transfom'. Every engine here has this trap.
-                return new FuzzyQuery(new Term("abstract", analyzed("abstract", text)), 2);
-            }
-            case "filtered" -> {
-                BooleanQuery.Builder bb = new BooleanQuery.Builder();
-                bb.add(parser.parse(QueryParser.escape(text)), BooleanClause.Occur.MUST);
-                // FILTER, not MUST: required, but contributes no score.
-                bb.add(LongPoint.newRangeQuery("update_date", epochDays(str(req, "date_from")), Long.MAX_VALUE),
-                       BooleanClause.Occur.FILTER);
-                return bb.build();
-            }
-            case "boosted" -> {
-                BooleanQuery.Builder bb = new BooleanQuery.Builder();
-                JsonArray boosts = arr(req, "boosts");
-                for (JsonElement el : boosts) {
-                    JsonArray pair = el.getAsJsonArray();
-                    String field = pair.get(0).getAsString();
-                    float weight = pair.get(1).getAsFloat();
-                    Query sub = new QueryParser(field, ANALYZER).parse(QueryParser.escape(text));
-                    // Field norms already favour short fields, so a title
-                    // boost compounds with that.
-                    bb.add(new BoostQuery(sub, weight), BooleanClause.Occur.SHOULD);
-                }
-                return bb.build();
-            }
-            default -> {
-                return parser.parse(QueryParser.escape(text));
-            }
-        }
+        // AND_OPERATOR would make bare terms MUST. Default OR matches what
+        // `match` does in Elasticsearch and what FT.SEARCH does with |.
+        parser.setDefaultOperator(QueryParser.Operator.OR);
+        return parser.parse(str(req, "q"));
     }
 
     // ------------------------------------------------------------- querying
 
     static JsonObject run(JsonObject req) throws Exception {
-        String kind = str(req, "kind");
+        if (req.has("stored")) return stored(req.get("stored").getAsString());
+
         Query query = build(req);
         JsonObject out = new JsonObject();
 
@@ -325,14 +254,14 @@ public class Search {
             return out;
         }
 
-        if ("facet".equals(kind) && facetState == null) {
+        if (req.has("facet") && facetState == null) {
             out.add("facets", new JsonArray());
-        } else if ("facet".equals(kind)) {
+        } else if (req.has("facet")) {
             // Counts come from the doc-values column, not the postings.
             // Multi-valued, so they sum past the hit count.
             FacetsCollector fc = searcher.search(query, new FacetsCollectorManager());
             Facets facets = new SortedSetDocValuesFacetCounts(facetState, fc);
-            FacetResult fr = facets.getTopChildren(10, FACET_FIELD);
+            FacetResult fr = facets.getTopChildren(10, req.get("facet").getAsString());
             JsonArray buckets = new JsonArray();
             if (fr != null) {
                 for (LabelAndValue lv : fr.labelValues) {
@@ -349,11 +278,10 @@ public class Search {
         int offset = req.has("offset") ? req.get("offset").getAsInt() : 0;
 
         TopDocs top;
-        String sortField = req.has("sort_field") && !req.get("sort_field").isJsonNull()
-                ? req.get("sort_field").getAsString() : null;
+        String sortField = req.has("sort") ? req.get("sort").getAsString() : null;
         if (sortField != null) {
             // Reads doc values and skips scoring, hence the NaN score below.
-            Sort sort = new Sort(new SortField(sortField + "_dv", SortField.Type.LONG, true));
+            Sort sort = new Sort(new SortField(sortField, SortField.Type.LONG, true));
             top = searcher.search(query, offset + limit, sort);
         } else {
             // Deep paging in one line: page 500 collects 5,000 hits and throws
@@ -362,7 +290,7 @@ public class Search {
         }
 
         Highlighter highlighter = null;
-        if ("highlight".equals(kind)) {
+        if (req.has("highlight")) {
             // Re-analyzes stored text at query time; term vectors would avoid
             // that at the cost of a much larger index.
             highlighter = new Highlighter(new SimpleHTMLFormatter("<em>", "</em>"), new QueryScorer(query));
@@ -387,5 +315,50 @@ public class Search {
         out.add("hits", hits);
         out.addProperty("total", top.totalHits.value);
         return out;
+    }
+
+    // ------------------------------------------------- what is on disk
+
+    /* Two different things live in a Lucene index and this prints both:
+     *
+     *   stored fields  the original text, verbatim, written by StoredField /
+     *                  TextField(store=YES). Never searched -- only read back
+     *                  once a hit is found, to build the response.
+     *   indexed terms  what the Analyzer produced. This is what the postings
+     *                  list is keyed on, and the only thing a query can match.
+     *
+     * The abstract is both: stored verbatim AND analyzed into terms. The two
+     * copies have nothing to do with each other at query time. */
+    static JsonObject stored(String id) throws Exception {
+        JsonObject out = new JsonObject();
+        TopDocs top = searcher.search(new TermQuery(new Term("id", id)), 1);
+        if (top.scoreDocs.length == 0) { out.addProperty("error", "no such doc: " + id); return out; }
+
+        Document d = searcher.storedFields().document(top.scoreDocs[0].doc);
+        JsonObject fields = new JsonObject();
+        for (IndexableField f : d.getFields()) {
+            String name = f.name();
+            if (fields.has(name)) fields.addProperty(name, fields.get(name).getAsString() + "|" + f.stringValue());
+            else fields.addProperty(name, f.stringValue());
+        }
+        out.add("fields", fields);
+        out.add("title_terms", analyze("title", d.get("title")));
+        out.add("abstract_terms", analyze("abstract", d.get("abstract")));
+        return out;
+    }
+
+    /* The same Analyzer instance the IndexWriter used. Running it here is the
+     * only way to see what actually landed in the postings, because Lucene
+     * does not store the token stream unless term vectors are switched on. */
+    static JsonArray analyze(String field, String text) throws Exception {
+        JsonArray terms = new JsonArray();
+        if (text == null) return terms;
+        try (TokenStream ts = ANALYZER.tokenStream(field, text)) {
+            CharTermAttribute term = ts.addAttribute(CharTermAttribute.class);
+            ts.reset();
+            while (ts.incrementToken()) terms.add(term.toString());
+            ts.end();
+        }
+        return terms;
     }
 }

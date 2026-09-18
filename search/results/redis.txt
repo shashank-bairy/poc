@@ -1,0 +1,185 @@
+== redis: indexing 5,000 docs
+   IndexStats(docs=5000, build_s=0.5215487499954179, size_bytes=7339900, notes='in RAM; inverted 7.0 MB, records 541776')
+
+========================================================================
+WHAT REDIS STORED for 0704.0002
+========================================================================
+HGETALL doc:0704.0002
+  doi          
+  update_date  14226
+  categories   math.CO|cs.CG
+  id           0704.0002
+  authors      Ileana Streinu|Louis Theran
+  abstract     We describe a new algorithm, the $(k,\ell)$-pebble game with colors, and use it obtain a charact
+  version_count 2
+  title        Sparsity-certifying Graph Decompositions
+
+  FT.EXPLAIN -> UNION {
+  retrieval
+  +retriev(expanded)
+  retriev(expanded)
+}
+
+========================================================================
+QUERY PATTERNS
+========================================================================
+
+---- 1-term ------------------------------------------------------------
+def q1_term(self):
+        # SCORER is explicit everywhere in this file. Redis defaults to TFIDF;
+        # BM25STD is the standard BM25 every other engine here uses. Same index,
+        # same postings -- only the ranking function changes.
+        return self.search(
+            "FT.SEARCH idx:docs 'retrieval' SCORER BM25STD WITHSCORES LIMIT 0 10 DIALECT 2"
+        )
+   10 rows:
+     0705.0751      Approximate textual retrieval
+     0710.0228      On the fractal nature of mutual relevance sequences in t
+     0802.1738      Characterising through Erasing: A Theoretical Framework 
+     0804.2057      Comparing and Combining Methods for Automatic Query Expa
+     0803.0053      Mobile Agents for Content-Based WWW Distributed Image Re
+
+---- 2-phrase ----------------------------------------------------------
+def q2_phrase(self):
+        # Quoted = exact phrase. Unquoted these are two ANDed terms and the
+        # positions are never consulted.
+        return self.search(
+            'FT.SEARCH idx:docs \'"attention mechanism"\' '
+            "SCORER BM25STD WITHSCORES LIMIT 0 10 DIALECT 2"
+        )
+   (no rows)
+
+---- 3-boolean ---------------------------------------------------------
+def q3_boolean(self):
+        return self.search(
+            "FT.SEARCH idx:docs 'retrieval (dense|sparse) -image' "
+            "SCORER BM25STD WITHSCORES LIMIT 0 10 DIALECT 2"
+        )
+   1 rows:
+     0712.2638      Towards Persistence-Based Reconstruction in Euclidean Sp
+
+---- 4-prefix ----------------------------------------------------------
+def q4_prefix(self):
+        return self.search(
+            "FT.SEARCH idx:docs 'quant*' SCORER BM25STD WITHSCORES LIMIT 0 10 DIALECT 2"
+        )
+   10 rows:
+     0808.2548      Negative Beta Encoder
+     0803.1575      A Quantifier Elimination Algorithm for Linear Real Arith
+     0712.1609      Distributed Consensus Algorithms in Sensor Networks: Qua
+     0806.4422      Computationally Efficient Estimators for Dimension Reduc
+     0704.3591      Capacity of a Class of Modulo-Sum Relay Channels
+
+---- 5-fuzzy -----------------------------------------------------------
+def q5_fuzzy(self):
+        # Two %, not one. Redis matches the fuzzy term against the *stemmed*
+        # dictionary without stemming the query term: the index holds
+        # 'transform', 3 edits from 'transfomer'. %transfomer% matches nothing.
+        return self.search(
+            "FT.SEARCH idx:docs '%%transfomer%%' SCORER BM25STD WITHSCORES LIMIT 0 10 DIALECT 2"
+        )
+   10 rows:
+     0805.0938      A Novel Piezoelectric Microtransformer for Autonmous Sen
+     0710.4999      L'analyse de l'expertise du point de vue de l'ergonomie 
+     0710.4689      Functional Equivalence Checking for Verification of Alge
+     0808.3281      On the diagonalization of the discrete Fourier transform
+     0705.0178      Oblivious Transfer based on Key Exchange
+
+---- 6-filter-text -----------------------------------------------------
+def q6_filter_text(self):
+        # Numeric filter and text query in one expression. update_date is epoch
+        # days because Redis has no date type, only NUMERIC; 19358 = 2023-01-01.
+        # The terms are OR'd: ANDed, they matched 11 documents against every
+        # other engine's 1,430.
+        return self.search(
+            "FT.SEARCH idx:docs '@update_date:[19358 +inf] (graph|neural)' "
+            "SCORER BM25STD WITHSCORES LIMIT 0 10 DIALECT 2"
+        )
+   10 rows:
+     0802.3284      Tur\'an Graphs, Stability Number, and Fibonacci Index
+     0704.1782      Asymptotics of the Euler number of bipartite graphs
+     0808.0163      Twice-Ramanujan Sparsifiers
+     0808.2172      The Continuous Graph FFT
+     0710.3901      A recursive linear time modular decomposition algorithm 
+
+---- 8-sort-date -------------------------------------------------------
+def q8_sort_date(self):
+        # SORTBY reads the SORTABLE column store, not the postings.
+        return self.search(
+            "FT.SEARCH idx:docs 'retrieval' SORTBY update_date DESC WITHSCORES LIMIT 0 10 DIALECT 2"
+        )
+   10 rows:
+     0708.4149      On the complexity of nonnegative matrix factorization
+     0808.2246      Comparing human and automatic thesaurus mapping approach
+     0806.2216      An Intelligent Multi-Agent Recommender System for Human 
+     0711.4388      Contextual Information Retrieval based on Algorithmic In
+     0807.4580      A Logical Model and Data Placement Strategies for MEMS S
+
+---- 9-deep-page -------------------------------------------------------
+def q9_deep_page(self):
+        # MAXSEARCHRESULTS (default 10,000) is the hard ceiling on this.
+        return self.search(
+            "FT.SEARCH idx:docs 'learning' SCORER BM25STD WITHSCORES LIMIT 4990 10 DIALECT 2"
+        )
+   (no rows)
+
+---- 10-highlight ------------------------------------------------------
+def q10_highlight(self):
+        # SUMMARIZE picks fragments, HIGHLIGHT wraps the matches. LEN is in
+        # words either side of the match, not characters.
+        return self.search(
+            'FT.SEARCH idx:docs \'"knowledge distillation"\' SCORER BM25STD WITHSCORES '
+            "SUMMARIZE FIELDS 1 abstract FRAGS 1 LEN 25 HIGHLIGHT FIELDS 1 abstract "
+            "LIMIT 0 10 DIALECT 2"
+        )
+   (no rows)
+
+---- 11-boosted --------------------------------------------------------
+def q11_boosted(self):
+        # Query-time field weighting, DIALECT 2 attribute syntax. Note the |
+        # inside each field clause: a space there means AND, and
+        # '@title:(language model)' matched 6 documents where every other
+        # engine matched 74,902.
+        return self.search(
+            "FT.SEARCH idx:docs '((@title:(language|model))=>{$weight: 5.0} | "
+            "(@abstract:(language|model))=>{$weight: 1.0})' "
+            "SCORER BM25STD WITHSCORES LIMIT 0 10 DIALECT 2"
+        )
+   10 rows:
+     0711.1360      Analytical approach to bit-string models of language evo
+     0801.4716      Methods to integrate a language model with semantic info
+     0801.1658      Computational approach to the emergence and evolution of
+     0710.1511      Demographic growth and the distribution of language size
+     0801.1415      The emerging field of language dynamics
+
+---- 7-facet ------------------------------------------------------------
+def q7_facet(self, top: int = 10) -> list[tuple[str, int]]:
+        # FT.AGGREGATE is a different pipeline from FT.SEARCH: it loads field
+        # values and runs GROUPBY/REDUCE stages.
+        #
+        # The catch: on a HASH this groups by the whole stored TAG string, so
+        # 'cs.IR|cs.LG' is ONE bucket, not two. The split and re-sum below is
+        # client-side work Lucene engines do not need -- they read a per-value
+        # doc-values column.
+        reply = self.run(
+            "FT.AGGREGATE idx:docs 'retrieval' GROUPBY 1 @categories "
+            "REDUCE COUNT 0 AS n SORTBY 2 @n DESC LIMIT 0 10000 DIALECT 2"
+        )
+        rows = (
+            [row.get("extra_attributes", {}) for row in reply["results"]]
+            if isinstance(reply, dict)  # RESP3
+            else [dict(zip(r[::2], r[1::2])) for r in reply[1:]]
+        )
+        counts: dict[str, int] = {}
+        for kv in rows:
+            for value in filter(None, kv.get("categories", "").split("|")):
+                counts[value] = counts.get(value, 0) + int(kv.get("n", 0))
+        return sorted(counts.items(), key=lambda kv: -kv[1])[:top]
+     cs.IR          20
+     cs.DB          7
+     cs.DS          6
+     cs.HC          4
+     cs.DL          4
+
+---- match count (no rows fetched) --------------------------------------
+     48 documents match
